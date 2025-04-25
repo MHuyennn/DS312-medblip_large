@@ -47,7 +47,7 @@ def BERTscore(bertscore, valid_captions, cands):
     return scores
 
 def evaluate_caption(root, score_type):
-    print(f"🔍 Đang đánh giá caption với phương pháp {score_type.upper()}")
+    print(f" Đang đánh giá caption với phương pháp {score_type.upper()}")
 
     valid_captions = pd.read_csv(os.path.join(root, "valid_captions.csv"))
     valid_captions = preprocess_df(valid_captions)
@@ -174,7 +174,7 @@ def evaluate_concept_official(root):
     pred_path = os.path.join(root, "results/valid_concepts.csv")
     evaluator = ConceptEvaluator(gt_path, secondary_gt_path)
     score, score_secondary = evaluator._evaluate(pred_path)
-    print(f"✅ Concept Detection:")
+    print(f" Concept Detection:")
     print(f" - Primary Score (Official F1):     {score:.4f}")
     print(f" - Secondary Score (Allowed only):  {score_secondary:.4f}")
 
