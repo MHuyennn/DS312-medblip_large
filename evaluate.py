@@ -1,23 +1,24 @@
+import os
+import csv
 import evaluate
 import numpy as np
-from rouge_score import rouge_scorer
-from bert_score import score
 import pandas as pd
-import os
-from tqdm import tqdm
 import re
 import warnings
-warnings.filterwarnings('ignore')
+from tqdm import tqdm
+from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.preprocessing import MultiLabelBinarizer
 import argparse
+
+warnings.filterwarnings('ignore')
+
+### ====== PHẦN CHẤM CAPTION (GIỮ NGUYÊN) ====== ###
 def preprocess_sentences(sentences):
     processed_sentences = []
     for sentence in sentences:
-        # Chuyển đổi tất cả các ký tự thành chữ thường
         sentence = sentence.lower()
-        # Xóa các ký tự đặc biệt và chuyển các số và chữ số thành token <n>
-        sentence = re.sub(r'[^\w\s]', '', sentence)  # Loại bỏ ký tự đặc biệt
-        sentence = re.sub(r'\b\d+\b', '<n>', sentence)  # Chuyển các số thành token <n>
-        # Loại bỏ từ, cụm từ, câu bị lặp lại liên tục nhiều lần
+        sentence = re.sub(r'[^\w\s]', '', sentence)
+        sentence = re.sub(r'\b\d+\b', '<n>', sentence)
         sentence_words = sentence.split()
         cleaned_words = []
         previous_word = None
@@ -26,172 +27,169 @@ def preprocess_sentences(sentences):
                 cleaned_words.append(word)
             previous_word = word
         cleaned_sentence = ' '.join(cleaned_words)
-        # Thêm câu đã xử lý vào list kết quả
         processed_sentences.append(cleaned_sentence)
     return processed_sentences
-# Hàm để xử lý DataFrame
+
 def preprocess_df(df):
     df['processed_Caption'] = preprocess_sentences(df['Caption'])
     return df
-def BERTscore (bertscore,valid_captions,cands) :
-    large_bert2 = []
-    length = len(cands["Caption"])
-    for i in tqdm(range(length)):
-        large_bert = bertscore.compute(predictions=[cands["Caption"][i]],
-                                lang="en",
-                                model_type="microsoft/deberta-xlarge-mnli",
-                                references=[valid_captions["Caption"][i]])
-        large_bert2.append(large_bert["f1"][0])
-    return large_bert2
-def evaluation(root,score):
-    """
-    root: path data evaluation 
-    score
-    """
 
-    valid_captions = pd.read_csv(root + "valid_captions.csv")
+def BERTscore(bertscore, valid_captions, cands):
+    scores = []
+    for i in tqdm(range(len(cands["Caption"]))):
+        bert = bertscore.compute(
+            predictions=[cands["Caption"][i]],
+            lang="en",
+            model_type="microsoft/deberta-xlarge-mnli",
+            references=[valid_captions["Caption"][i]]
+        )
+        scores.append(bert["f1"][0])
+    return scores
+
+def evaluate_caption(root, score_type):
+    print(f"🔍 Đang đánh giá caption với phương pháp {score_type.upper()}")
+
+    valid_captions = pd.read_csv(os.path.join(root, "valid_captions.csv"))
     valid_captions = preprocess_df(valid_captions)
 
-    # Large
-    large_greedy = pd.read_csv(root + "large_greedy.csv")
-    large_beam3 = pd.read_csv(root + "large_beam3.csv")
-    large_beam4 = pd.read_csv(root + "large_beam4.csv")
-    large_beam5 = pd.read_csv(root + "large_beam5.csv")
-    large_beam10 = pd.read_csv(root + "large_beam10.csv")
-
-    large_greedy = preprocess_df(large_greedy)
-    large_beam3 = preprocess_df(large_beam3)
-    large_beam4 = preprocess_df(large_beam4)
-    large_beam5 = preprocess_df(large_beam5)
-    large_beam10 = preprocess_df(large_beam10)
-
-    # Base 
-    base_greedy = pd.read_csv(root + "base_greedy.csv")
-    base_beam3 = pd.read_csv(root + "base_beam3.csv")
-    base_beam4 = pd.read_csv(root + "base_beam4.csv")
-    base_beam5 = pd.read_csv(root + "base_beam5.csv")
-    base_beam10 = pd.read_csv(root + "base_beam10.csv")
-
-
-    base_greedy = preprocess_df(base_greedy)
-    base_beam3 = preprocess_df(base_beam3)
-    base_beam4 = preprocess_df(base_beam4)
-    base_beam5 = preprocess_df(base_beam5)
-    base_beam10 = preprocess_df(base_beam10)
+    predictions = pd.read_csv(os.path.join(root, "results/valid_captions.csv"))
+    predictions = preprocess_df(predictions)
 
     bleu = evaluate.load("bleu")
-    rouge = evaluate.load('rouge')
-    meteor = evaluate.load('meteor')
+    rouge = evaluate.load("rouge")
+    meteor = evaluate.load("meteor")
     bertscore = evaluate.load("bertscore")
-    bleurt = evaluate.load("bleurt", module_type="metric",checkpoint  ="BLEURT-20")
-    if(score=='rouge'):
-      # @title Base
-        base_greedy_rouge = rouge.compute(predictions=base_greedy["Caption"], references=valid_captions["Caption"])["rouge1"]
-        base_beam3_rouge = rouge.compute(predictions=base_beam3["Caption"], references=valid_captions["Caption"])["rouge1"]
-        base_beam4_rouge = rouge.compute(predictions=base_beam4["Caption"], references=valid_captions["Caption"])["rouge1"]
-        base_beam5_rouge = rouge.compute(predictions=base_beam5["Caption"], references=valid_captions["Caption"])["rouge1"]
-        base_beam10_rouge = rouge.compute(predictions=base_beam10["Caption"], references=valid_captions["Caption"])["rouge1"]
-        print( "Base Greedy:" , round(base_greedy_rouge,6))
-        print( "Base Beam 3:" , round(base_beam3_rouge,6))
-        print( "Base Beam 4:" , round(base_beam4_rouge,6))
-        print( "Base Beam 5:" , round(base_beam5_rouge,6))
-        print( "Base Beam 10:", round(base_beam10_rouge,6))
 
-        # @title Large
-        large_greedy_rouge = rouge.compute(predictions=large_greedy["Caption"], references=valid_captions["Caption"])["rouge1"]
-        large_beam3_rouge = rouge.compute(predictions=large_beam3["Caption"], references=valid_captions["Caption"])["rouge1"]
-        large_beam4_rouge = rouge.compute(predictions=large_beam4["Caption"], references=valid_captions["Caption"])["rouge1"]
-        large_beam5_rouge = rouge.compute(predictions=large_beam5["Caption"], references=valid_captions["Caption"])["rouge1"]
-        large_beam10_rouge = rouge.compute(predictions=large_beam10["Caption"], references=valid_captions["Caption"])["rouge1"]
-        print( "Large Greedy:" , round(large_greedy_rouge,6))
-        print( "Large Beam 3:" , round(large_beam3_rouge,6))
-        print( "Large Beam 4:" , round(large_beam4_rouge,6))
-        print( "Large Beam 5:" , round(large_beam5_rouge,6))
-        print( "Large Beam 10:", round(large_beam10_rouge,6))
-    elif(score=='bleu'):
-       # @title Base
-        base_greedy_bleu = bleu.compute(predictions=base_greedy["Caption"], references=valid_captions["Caption"])["precisions"][0]
-        base_beam3_bleu  = bleu.compute(predictions=base_beam3["Caption"] , references=valid_captions["Caption"])["precisions"][0]
-        base_beam4_bleu  = bleu.compute(predictions=base_beam4["Caption"] , references=valid_captions["Caption"])["precisions"][0]
-        base_beam5_bleu  = bleu.compute(predictions=base_beam5["Caption"] , references=valid_captions["Caption"])["precisions"][0]
-        base_beam10_bleu = bleu.compute(predictions=base_beam10["Caption"], references=valid_captions["Caption"])["precisions"][0]
-        print( "Base Greedy:" , round(base_greedy_bleu,6))
-        print( "Base Beam 3:" , round(base_beam3_bleu,6))
-        print( "Base Beam 4:" , round(base_beam4_bleu,6))
-        print( "Base Beam 5:" , round(base_beam5_bleu,6))
-        print( "Base Beam 10:", round(base_beam10_bleu,6))
-        # @title Large
-        large_greedy_bleu = bleu.compute(predictions=large_greedy["Caption"], references=valid_captions["Caption"])["precisions"][0]
-        large_beam3_bleu  = bleu.compute(predictions=large_beam3["Caption"] , references=valid_captions["Caption"])["precisions"][0]
-        large_beam4_bleu  = bleu.compute(predictions=large_beam4["Caption"] , references=valid_captions["Caption"])["precisions"][0]
-        large_beam5_bleu  = bleu.compute(predictions=large_beam5["Caption"] , references=valid_captions["Caption"])["precisions"][0]
-        large_beam10_bleu = bleu.compute(predictions=large_beam10["Caption"], references=valid_captions["Caption"])["precisions"][0]
-        print( "Large Greedy:" , round(large_greedy_bleu,6))
-        print( "Large Beam 3:" , round(large_beam3_bleu,6))
-        print( "Large Beam 4:" , round(large_beam4_bleu,6))
-        print( "Large Beam 5:" , round(large_beam5_bleu,6))
-        print( "Large Beam 10:", round(large_beam10_bleu,6))
-    elif(score=='meteor'):
-        # @title Base
-        base_greedy_meteor = meteor.compute(predictions=base_greedy["Caption"], references=valid_captions["Caption"])["meteor"]
-        base_beam3_meteor = meteor.compute(predictions=base_beam3["Caption"], references=valid_captions["Caption"])["meteor"]
-        base_beam4_meteor = meteor.compute(predictions=base_beam4["Caption"], references=valid_captions["Caption"])["meteor"]
-        base_beam5_meteor = meteor.compute(predictions=base_beam5["Caption"], references=valid_captions["Caption"])["meteor"]
-        base_beam10_meteor = meteor.compute(predictions=base_beam10["Caption"], references=valid_captions["Caption"])["meteor"]
-        print( "Base Greedy:" , round(base_greedy_meteor,6))
-        print( "Base Beam 3:" , round(base_beam3_meteor,6))
-        print( "Base Beam 4:" , round(base_beam4_meteor,6))
-        print( "Base Beam 5:" , round(base_beam5_meteor,6))
-        print( "Base Beam 10:", round(base_beam10_meteor,6))
-        # @title Large
-        large_greedy_meteor = meteor.compute(predictions=large_greedy["Caption"], references=valid_captions["Caption"])["meteor"]
-        large_beam3_meteor = meteor.compute(predictions=large_beam3["Caption"], references=valid_captions["Caption"])["meteor"]
-        large_beam4_meteor = meteor.compute(predictions=large_beam4["Caption"], references=valid_captions["Caption"])["meteor"]
-        large_beam5_meteor = meteor.compute(predictions=large_beam5["Caption"], references=valid_captions["Caption"])["meteor"]
-        large_beam10_meteor = meteor.compute(predictions=large_beam10["Caption"], references=valid_captions["Caption"])["meteor"]
-        print( "Large Greedy:" , round(large_greedy_meteor,6))
-        print( "Large Beam 3:" , round(large_beam3_meteor,6))
-        print( "Large Beam 4:" , round(large_beam4_meteor,6))
-        print( "Large Beam 5:" , round(large_beam5_meteor,6))
-        print( "Large Beam 10:", round(large_beam10_meteor,6))
-    elif (score=='bertscore'):
-        # @title Large
-        base_greedy_bert = BERTscore(bertscore,valid_captions,base_greedy)
-        base_beam3_bert  = BERTscore(bertscore,valid_captions,base_beam3)
-        base_beam4_bert  = BERTscore(bertscore,valid_captions,base_beam4)
-        base_beam5_bert  = BERTscore(bertscore,valid_captions,base_beam5)
-        base_beam10_bert = BERTscore(bertscore,valid_captions,base_beam10)
-        print( "Base Greedy:" , round(np.average(base_greedy_bert),6))
-        print( "Base Beam 3:" , round(np.average(base_beam3_bert),6))
-        print( "Base Beam 4:" , round(np.average(base_beam4_bert),6))
-        print( "Base Beam 5:" , round(np.average(base_beam5_bert),6))
-        print( "Base Beam 10:", round(np.average(base_beam10_bert),6))
+    if score_type == 'rouge':
+        result = rouge.compute(predictions=predictions["Caption"], references=valid_captions["Caption"])
+        print("ROUGE-1:", round(result["rouge1"], 6))
+        print("ROUGE-L:", round(result["rougeL"], 6))
 
-        # @title Large
-        large_greedy_bert = BERTscore(bertscore,valid_captions,large_greedy)
-        large_beam3_bert  = BERTscore(bertscore,valid_captions,large_beam3)
-        large_beam4_bert  = BERTscore(bertscore,valid_captions,large_beam4)
-        large_beam5_bert  = BERTscore(bertscore,valid_captions,large_beam5)
-        large_beam10_bert = BERTscore(bertscore,valid_captions,large_beam10)
-        print( "Large Greedy:" , round(np.average(large_greedy_bert),6))
-        print( "Large Beam 3:" , round(np.average(large_beam3_bert),6))
-        print( "Large Beam 4:" , round(np.average(large_beam4_bert),6))
-        print( "Large Beam 5:" , round(np.average(large_beam5_bert),6))
-        print( "Large Beam 10:", round(np.average(large_beam10_bert),6))
+    elif score_type == 'bleu':
+        result = bleu.compute(predictions=predictions["Caption"], references=valid_captions["Caption"])
+        print("BLEU Precision-1:", round(result["precisions"][0], 6))
 
+    elif score_type == 'meteor':
+        result = meteor.compute(predictions=predictions["Caption"], references=valid_captions["Caption"])
+        print("METEOR:", round(result["meteor"], 6))
 
+    elif score_type == 'bertscore':
+        result = BERTscore(bertscore, valid_captions, predictions)
+        print("BERTScore (avg F1):", round(np.average(result), 6))
 
+### ====== PHẦN CHẤM CONCEPT CHUẨN IMAGECLEF ====== ###
+class ConceptEvaluator:
+    def __init__(self, ground_truth_path, secondary_ground_truth_path):
+        self.ground_truth_path = ground_truth_path
+        self.ground_truth_path_secondary = secondary_ground_truth_path
+        self.gt = self.load_gt(self.ground_truth_path)
+        self.gt_secondary = self.load_gt(self.ground_truth_path_secondary)
+
+    def _evaluate(self, prediction_path):
+        predictions = self.load_predictions(prediction_path)
+        score = self.compute_primary_score(predictions)
+        score_secondary = self.compute_secondary_score(predictions)
+        return score, score_secondary
+
+    def load_gt(self, path):
+        gt = {}
+        with open(path) as csvfile:
+            reader = csv.reader(csvfile)
+            for row in reader:
+                if "ID" not in row[0]:
+                    image_id = row[0]
+                    concepts = tuple(concept.strip() for concept in row[1].split(";")) if len(row) > 1 else tuple()
+                    gt[image_id] = concepts
+        return gt
+
+    def load_predictions(self, submission_file_path):
+        predictions = {}
+        image_ids_gt = tuple(self.gt.keys())
+        max_num_concepts = 100
+        with open(submission_file_path) as csvfile:
+            reader = csv.reader(csvfile)
+            lineCnt = 0
+            for row in reader:
+                if "ID" not in row[0]:
+                    lineCnt += 1
+                    if not 1 <= len(row) <= 2:
+                        raise Exception(f"Wrong format at line {lineCnt}")
+                    image_id = row[0]
+                    if image_id not in image_ids_gt:
+                        raise Exception(f"Image ID {image_id} không tồn tại trong tập test tại dòng {lineCnt}")
+                    if image_id in predictions:
+                        raise Exception(f"Image ID {image_id} bị trùng tại dòng {lineCnt}")
+                    concepts = tuple(con.strip() for con in row[1].split(";")) if len(row) > 1 else tuple()
+                    if len(concepts) > max_num_concepts:
+                        raise Exception(f"Dòng {lineCnt} có quá nhiều concept (>100)")
+                    if len(concepts) != len(set(concepts)):
+                        raise Exception(f"Dòng {lineCnt} có concept bị lặp")
+                    predictions[image_id] = concepts
+            if len(predictions) != len(image_ids_gt):
+                raise Exception(f"Số lượng ảnh không khớp ground truth: {len(predictions)} vs {len(image_ids_gt)}")
+        return predictions
+
+    def compute_primary_score(self, predictions):
+        max_score = len(self.gt)
+        current_score = 0
+        for image_id in predictions:
+            pred = tuple(con.upper() for con in predictions[image_id])
+            gt = tuple(con.upper() for con in self.gt[image_id])
+            if len(gt) == 0:
+                max_score -= 1
+                continue
+            all_concepts = sorted(list(set(gt + pred)))
+            y_true = [int(c in gt) for c in all_concepts]
+            y_pred = [int(c in pred) for c in all_concepts]
+            f1score = f1_score(y_true, y_pred, average="binary")
+            current_score += f1score
+        return current_score / max_score
+
+    def compute_secondary_score(self, predictions):
+        max_score = len(self.gt_secondary)
+        current_score = 0
+        allowed_concepts = {
+            "C0002978", "C0040405", "C0024485", "C0032743", "C0041618", "C1306645",
+            "C1140618", "C0037949", "C0030797", "C0023216", "C0037303", "C0817096",
+            "C0006141", "C0000726", "C0920367"
+        }
+        for image_id in predictions:
+            pred = tuple(con.upper() for con in predictions[image_id])
+            gt = tuple(con.upper() for con in self.gt_secondary[image_id])
+            pred = tuple(c for c in pred if c in allowed_concepts)
+            gt = tuple(c for c in gt if c in allowed_concepts)
+            if len(gt) == 0:
+                max_score -= 1
+                continue
+            all_concepts = sorted(list(set(gt + pred)))
+            y_true = [int(c in gt) for c in all_concepts]
+            y_pred = [int(c in pred) for c in all_concepts]
+            f1score = f1_score(y_true, y_pred, average="binary")
+            current_score += f1score
+        return current_score / max_score
+
+def evaluate_concept_official(root):
+    gt_path = os.path.join(root, "valid/valid_concepts.csv")
+    secondary_gt_path = os.path.join(root, "valid/concepts_manual.csv")
+    pred_path = os.path.join(root, "results/valid_concepts.csv")
+    evaluator = ConceptEvaluator(gt_path, secondary_gt_path)
+    score, score_secondary = evaluator._evaluate(pred_path)
+    print(f"✅ Concept Detection:")
+    print(f" - Primary Score (Official F1):     {score:.4f}")
+    print(f" - Secondary Score (Allowed only):  {score_secondary:.4f}")
+
+### ====== MAIN CLI ====== ###
 def main():
-     # Initializes a parser for command-line arguments.
     parser = argparse.ArgumentParser()
+    parser.add_argument('--root', type=str, default='./')
+    parser.add_argument('--task', type=str, choices=['caption', 'concept'], default='caption')
+    parser.add_argument('--score', type=str, default='rouge', help="Chỉ dùng cho caption: rouge/bleu/meteor/bertscore")
+    args = parser.parse_args()
 
-    # Creates subparsers for different commands.
-    subparsers = parser.add_subparsers(dest='command')
+    if args.task == "caption":
+        evaluate_caption(args.root, args.score)
+    elif args.task == "concept":
+        evaluate_concept_official(args.root)
 
-    # Adds a subparser for the 'train' command.
-    parser_train = subparsers.add_parser('eval')
-
-    # Adds an argument for the directory containing public data.
-    parser_train.add_argument('--root', type=str,default='./')
-    
-    parser_train.add_argument('--score', type=str,default='rouge')
+if __name__ == "__main__":
+    main()
