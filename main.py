@@ -12,8 +12,8 @@ from model import MedBLIPMultiTaskModel
 
 def train(root_path, batch_size=4, num_epochs=2, lr=1e-5, load_weights=False, path_weights="./checkpoints/"):
     train_dir = os.path.join(root_path, "train/train")
-    train_captions = os.path.join(root_path, "train/train_captions.csv")
-    train_concepts = os.path.join(root_path, "train/train_concepts.csv")
+    train_captions = os.path.join(root_path, "train_captions.csv")
+    train_concepts = os.path.join(root_path, "train_concepts.csv")
 
     df_cap = pd.read_csv(train_captions)
     df_con = pd.read_csv(train_concepts)
