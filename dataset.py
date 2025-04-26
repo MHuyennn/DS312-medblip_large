@@ -1,10 +1,8 @@
-
 import cv2
 import os
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import MultiLabelBinarizer
+from torch.utils.data import Dataset
 
 class ImgCaptionConceptDataset(Dataset):
     """Dataset hỗ trợ đồng thời caption prediction và concept detection."""
@@ -12,6 +10,7 @@ class ImgCaptionConceptDataset(Dataset):
                  df, 
                  path,
                  processor=None,
+                 mlb=None,
                  image_size=(224, 224),
                  max_length=100):
         self.df = df
@@ -23,11 +22,10 @@ class ImgCaptionConceptDataset(Dataset):
 
         self.df["CUI_list"] = self.df["CUIs"]
 
-        # Dùng MultiLabelBinarizer để chuyển thành vector multi-hot
-        self.mlb = MultiLabelBinarizer()
-        self.label_matrix = self.mlb.fit_transform(self.df["CUI_list"])
+        # Không fit MultiLabelBinarizer ở đây nữa, mà nhận mlb từ ngoài
+        self.mlb = mlb
+        self.label_matrix = self.mlb.transform(self.df["CUI_list"])
 
-        # Lưu lại tất cả CUI để dùng sau này nếu cần
         self.classes_ = self.mlb.classes_
 
     def get_caption_by_id(self, idx):
@@ -37,6 +35,8 @@ class ImgCaptionConceptDataset(Dataset):
         iid = self.df["ID"].iloc[idx]
         img_path = os.path.join(self.path, str(iid) + ".jpg")
         image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Chuyển sang RGB đúng chuẩn
+        image = cv2.resize(image, self.image_size)
         return image
     
     def get_multilabel_vector(self, idx):
@@ -47,7 +47,6 @@ class ImgCaptionConceptDataset(Dataset):
     
     def __getitem__(self, idx):
         image = self.get_image_by_id(idx)
-        image = cv2.resize(image, self.image_size)
         caption = self.get_caption_by_id(idx)
 
         # Tokenize input image + caption
