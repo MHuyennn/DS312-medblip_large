@@ -51,16 +51,18 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
-    # ⚡ Đây là chỗ fix cực quan trọng
+    # ⚡ Cực kỳ quan trọng: chỉ lấy concepts thực sự có trong train
     concept_names_in_train = set()
     for concept_list in df_train["Concept_Names"]:
         concept_names_in_train.update(concept_list)
-
     concept_names_in_train = list(concept_names_in_train)
 
     df_cui_train = df_cui[df_cui["Name"].isin(concept_names_in_train)].reset_index(drop=True)
 
     name_embeddings, name_list = load_cui_name_embeddings(df_cui_train, processor, device)
+
+    # ⚡ Cực kỳ quan trọng: đảm bảo name_list là duy nhất
+    name_list = list(set(name_list))
 
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
@@ -118,7 +120,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model, save_path)
-            print(f"Saved best model to {save_path}")
+            print(f"✅ Saved best model to {save_path}")
 
 def predict(root_path, split="test", task="caption", batch_size=4):
     """Predict caption hoặc concept detection."""
