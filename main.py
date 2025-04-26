@@ -13,14 +13,14 @@ from model import MedBLIPMultitask
 from evaluate import evaluate_caption, evaluate_concept
 
 def load_cui_name_embeddings(df_cui, processor, device):
-    """Tạo embeddings từ danh sách Name concepts."""
     names = df_cui["Name"].tolist()
     inputs = processor.tokenizer(names, padding=True, truncation=True, return_tensors="pt").to(device)
 
-    with torch.no_grad():
-        model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
-        text_outputs = model.text_encoder(**inputs)
-        name_embeddings = text_outputs.last_hidden_state[:, 0, :]  # CLS token
+    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
+    
+    input_embeddings = model.text_decoder.get_input_embeddings()(inputs.input_ids)  # (batch_size, seq_len, hidden_dim)
+
+    name_embeddings = input_embeddings.mean(dim=1)  # Trung bình các token
 
     return name_embeddings, names
 
