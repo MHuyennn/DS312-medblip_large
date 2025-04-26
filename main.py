@@ -46,12 +46,12 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     df_train = pd.merge(df_cap_train, df_con_train, on="ID")
     df_valid = pd.merge(df_cap_valid, df_con_valid, on="ID")
 
-    df_train["Concept_Names"] = df_train["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
-    df_valid["Concept_Names"] = df_valid["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
+    df_train["Concept_Names"] = df_train["CUIs"].apply(lambda x: [cui2name[cui] for cui in str(x).split(";") if cui in cui2name])
+    df_valid["Concept_Names"] = df_valid["CUIs"].apply(lambda x: [cui2name[cui] for cui in str(x).split(";") if cui in cui2name])
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
-    # ⚡ Cực kỳ quan trọng: chỉ lấy concepts thực sự có trong train
+    # ⚡ Sửa đúng bài
     concept_names_in_train = set()
     for concept_list in df_train["Concept_Names"]:
         concept_names_in_train.update(concept_list)
@@ -59,10 +59,9 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
 
     df_cui_train = df_cui[df_cui["Name"].isin(concept_names_in_train)].reset_index(drop=True)
 
-    name_embeddings, name_list = load_cui_name_embeddings(df_cui_train, processor, device)
+    name_list = df_cui_train["Name"].tolist()
 
-    # ⚡ Cực kỳ quan trọng: đảm bảo name_list là duy nhất
-    name_list = list(set(name_list))
+    name_embeddings, _ = load_cui_name_embeddings(df_cui_train, processor, device)
 
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
@@ -105,6 +104,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
             loss_caption = outputs["loss_caption"]
             logits_concept = outputs["logits_concept"]
 
+            # loss concept
             loss_concept = criterion_concept(logits_concept, labels_concept)
 
             loss = loss_caption + loss_concept
