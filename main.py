@@ -17,7 +17,7 @@ def load_cui_name_embeddings(cui_names_path, device="cuda"):
     vectors, cui_list = [], []
 
     for _, row in df.iterrows():
-        inputs = tokenizer(row["name"], return_tensors="pt", truncation=True, padding=True).to(device)
+        inputs = tokenizer(row["Name"], return_tensors="pt", truncation=True, padding=True).to(device)
         with torch.no_grad():
             outputs = encoder(**inputs)
             emb = outputs.last_hidden_state[:, 0, :]
