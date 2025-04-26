@@ -20,7 +20,7 @@ def load_cui_name_embeddings(df_cui, processor, device):
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
     
     input_embeddings = model.text_decoder.get_input_embeddings()(inputs.input_ids)
-    name_embeddings = input_embeddings.mean(dim=1)  # Trung bình theo chiều sequence
+    name_embeddings = input_embeddings.mean(dim=1)  # Trung bình các token sequence
 
     return name_embeddings, names
 
@@ -50,9 +50,17 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     df_valid["Concept_Names"] = df_valid["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    name_embeddings, name_list = load_cui_name_embeddings(df_cui, processor, device)
 
-    name_list = list(set(name_list))  # <-- QUAN TRỌNG: bỏ trùng name trước khi dùng MultiLabelBinarizer
+    # ⚡ Đây là chỗ fix cực quan trọng
+    concept_names_in_train = set()
+    for concept_list in df_train["Concept_Names"]:
+        concept_names_in_train.update(concept_list)
+
+    concept_names_in_train = list(concept_names_in_train)
+
+    df_cui_train = df_cui[df_cui["Name"].isin(concept_names_in_train)].reset_index(drop=True)
+
+    name_embeddings, name_list = load_cui_name_embeddings(df_cui_train, processor, device)
 
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
@@ -110,7 +118,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model, save_path)
-            print(f"✅ Saved best model to {save_path}")
+            print(f"Saved best model to {save_path}")
 
 def predict(root_path, split="test", task="caption", batch_size=4):
     """Predict caption hoặc concept detection."""
@@ -146,7 +154,7 @@ def predict(root_path, split="test", task="caption", batch_size=4):
         save_path = os.path.join(root_path, f"{split}_concepts_pred.csv")
     
     result_df.to_csv(save_path, index=False)
-    print(f"✅ Saved predictions to {save_path}")
+    print(f"Saved predictions to {save_path}")
 
 def main():
     parser = argparse.ArgumentParser()
