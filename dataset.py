@@ -21,8 +21,7 @@ class ImgCaptionConceptDataset(Dataset):
         self.path = path
         self.ids = list(self.df["ID"])
 
-        # Xử lý nhãn concept: chuyển CUI string -> list
-        self.df["CUI_list"] = self.df["CUIs"].apply(lambda x: x.split(";"))
+        self.df["CUI_list"] = self.df["CUIs"]
 
         # Dùng MultiLabelBinarizer để chuyển thành vector multi-hot
         self.mlb = MultiLabelBinarizer()
