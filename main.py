@@ -1,106 +1,172 @@
 import os
 import argparse
-import torch
 import pandas as pd
-from transformers import AutoTokenizer, AutoModel, AutoProcessor, BlipForConditionalGeneration
-from torch.utils.data import DataLoader
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from tqdm import tqdm
+from sklearn.preprocessing import MultiLabelBinarizer
+from transformers import AutoProcessor, BlipForConditionalGeneration
+
 from dataset import ImgCaptionConceptDataset
 from model import MedBLIPMultitask
-import torch.nn.functional as F
+from evaluate import evaluate_caption, evaluate_concept
 
-def load_cui_name_embeddings(cui_names_path, device="cuda"):
-    df = pd.read_csv(cui_names_path)
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    encoder = AutoModel.from_pretrained("bert-base-uncased").to(device)
-    encoder.eval()
+def load_cui_name_embeddings(df_cui, processor, device):
+    """Tạo embeddings từ danh sách Name concepts."""
+    names = df_cui["Name"].tolist()
+    inputs = processor.tokenizer(names, padding=True, truncation=True, return_tensors="pt").to(device)
 
-    vectors, cui_list = [], []
+    with torch.no_grad():
+        model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
+        text_outputs = model.text_encoder(**inputs)
+        name_embeddings = text_outputs.last_hidden_state[:, 0, :]  # CLS token
 
-    for _, row in df.iterrows():
-        inputs = tokenizer(row["Name"], return_tensors="pt", truncation=True, padding=True).to(device)
-        with torch.no_grad():
-            outputs = encoder(**inputs)
-            emb = outputs.last_hidden_state[:, 0, :]
-        vectors.append(emb.squeeze(0).cpu())
-        cui_list.append(row["CUI"])
+    return name_embeddings, names
 
-    emb_tensor = torch.stack(vectors)
-    return emb_tensor, cui_list
-
-def train(root_path, batch_size=4, num_epochs=2, lr=1e-5, load_weights=False, path_weights="./checkpoints"):
+def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_best.pth"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_dir = os.path.join(root_path, "train/train")
-    train_captions = os.path.join(train_dir, "train_captions.csv")
-    train_concepts = os.path.join(train_dir, "train_concepts.csv")
-    cui_names = os.path.join(root_path,"cui_names.csv") 
+    # 1. Load data
+    train_img_dir = os.path.join(root_path, "train/train")
+    valid_img_dir = os.path.join(root_path, "valid/valid")
+    caption_train_csv = os.path.join(train_img_dir, "train_captions.csv")
+    concept_train_csv = os.path.join(train_img_dir, "train_concepts.csv")
+    caption_valid_csv = os.path.join(valid_img_dir, "valid_captions.csv")
+    concept_valid_csv = os.path.join(valid_img_dir, "valid_concepts.csv")
+    cui_names_csv = os.path.join(root_path, "cui_names.csv")
 
-    df_cap = pd.read_csv(train_captions)
-    df_con = pd.read_csv(train_concepts)
-    df_train = pd.merge(df_cap, df_con, on="ID")
+    df_cap_train = pd.read_csv(caption_train_csv)
+    df_con_train = pd.read_csv(concept_train_csv)
+    df_cap_valid = pd.read_csv(caption_valid_csv)
+    df_con_valid = pd.read_csv(concept_valid_csv)
+    df_cui = pd.read_csv(cui_names_csv)
 
-    model_blip = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
+    # 2. Map CUIs thành Name
+    cui2name = dict(zip(df_cui["CUI"], df_cui["Name"]))
+    df_train = pd.merge(df_cap_train, df_con_train, on="ID")
+    df_valid = pd.merge(df_cap_valid, df_con_valid, on="ID")
+
+    df_train["Concept_Names"] = df_train["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
+    df_valid["Concept_Names"] = df_valid["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
+
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = MedBLIPMultitask(model_blip.vision_model, model_blip.text_decoder, processor).to(device)
+    name_embeddings, name_list = load_cui_name_embeddings(df_cui, processor, device)
 
-    emb_tensor, cui_list = load_cui_name_embeddings(cui_names, device)
-    model.set_concept_embeddings(emb_tensor.to(device))
+    # 3. MultiLabelBinarizer
+    mlb = MultiLabelBinarizer(classes=name_list)
+    mlb.fit(df_train["Concept_Names"])
 
-    from sklearn.preprocessing import MultiLabelBinarizer
-    mlb = MultiLabelBinarizer(classes=cui_list)
-    df_train["CUIs"] = df_train["CUIs"].apply(lambda x: x.split(";"))
-    mlb.fit(df_train["CUIs"])
+    # 4. Dataset và DataLoader
+    train_dataset = ImgCaptionConceptDataset(df_train, train_img_dir, processor, name_list, mlb, mode="train")
+    valid_dataset = ImgCaptionConceptDataset(df_valid, valid_img_dir, processor, name_list, mlb, mode="valid")
 
-    dataset = ImgCaptionConceptDataset(df_train, train_dir, processor, mlb)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    # 5. Model
+    blip_base = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    model = MedBLIPMultitask(
+        vision_encoder=blip_base.vision_model,
+        text_decoder=blip_base.text_decoder,
+        processor=processor
+    ).to(device)
 
-    model.train()
+    model.set_concept_embeddings(name_embeddings)
+
+    # 6. Optimizer và Loss
+    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    criterion_concept = nn.BCEWithLogitsLoss()
+
+    # 7. Training loop
+    best_loss = float('inf')
     for epoch in range(num_epochs):
-        total_loss = 0
-        for batch in dataloader:
+        model.train()
+        running_loss = 0.0
+
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Training"):
+            optimizer.zero_grad()
+
             pixel_values = batch["pixel_values"].to(device)
-            labels = batch["labels"].to(device)
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
+            labels_caption = batch["labels_caption"].to(device)
+            labels_concept = batch["labels_concept"].to(device)
 
-            outputs = model(pixel_values, input_ids=input_ids, attention_mask=attention_mask, mode="caption")
-            loss_caption = outputs.loss
+            outputs = model(pixel_values, input_ids=input_ids, attention_mask=attention_mask, mode="train")
+            loss_caption = outputs["loss_caption"]
+            logits_concept = outputs["logits_concept"]
 
-            logits = model(pixel_values, mode="concept")
-            loss_concept = F.binary_cross_entropy_with_logits(logits, labels.float())
+            loss_concept = criterion_concept(logits_concept, labels_concept)
 
             loss = loss_caption + loss_concept
-            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
 
-        print(f"Epoch {epoch+1} Loss: {total_loss/len(dataloader):.4f}")
+            running_loss += loss.item()
+
+        avg_loss = running_loss / len(train_loader)
+        print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {avg_loss:.4f}")
+
+        # Save best model
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save(model, save_path)
+            print(f"Saved best model to {save_path}")
+
+def predict(root_path, split="test", task="caption", batch_size=4):
+    """Predict caption hoặc concept."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    img_dir = os.path.join(root_path, split, split)
+    cui_names_csv = os.path.join(root_path, "cui_names.csv")
+    df_cui = pd.read_csv(cui_names_csv)
+
+    processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+
+    name_list = df_cui["Name"].tolist()
+    mlb = MultiLabelBinarizer(classes=name_list)
+    mlb.fit([])  # Empty fit để giữ đúng thứ tự classes
+
+    # Load model
+    model = torch.load(os.path.join(root_path, "model_best.pth"), map_location=device)
+    model.to(device)
+
+    # Load image ID
+    ids = [os.path.splitext(f)[0] for f in os.listdir(img_dir) if f.endswith(".jpg")]
+    df_test = pd.DataFrame({"ID": ids})
+    df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
+    df_test["Caption"] = [""] * len(df_test)
+
+    dataset = ImgCaptionConceptDataset(df_test, img_dir, processor, name_list, mlb, mode="test")
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    if task == "caption":
+        result_df, _ = evaluate_caption(model, dataloader, processor, device)
+        save_path = os.path.join(root_path, f"{split}_captions_pred.csv")
+    elif task == "concept":
+        name2cui = dict(zip(df_cui["Name"], df_cui["CUI"]))
+        result_df = evaluate_concept(model, dataloader, device, mlb, name2cui)
+        save_path = os.path.join(root_path, f"{split}_concepts_pred.csv")
+    
+    result_df.to_csv(save_path, index=False)
+    print(f"Saved predictions to {save_path}")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["train", "eval_caption", "eval_concept"])
-    parser.add_argument("--root_path", required=True)
+    parser.add_argument("mode", type=str, choices=["train", "predict"])
+    parser.add_argument("--root_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_epochs", type=int, default=2)
+    parser.add_argument("--num_epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--load_weights", action="store_true")
-    parser.add_argument("--path_weights", type=str, default="./checkpoints")
-    parser.add_argument("--score", type=str, default="rouge") 
+    parser.add_argument("--task", type=str, choices=["caption", "concept"], default="caption")
+    parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     args = parser.parse_args()
 
     if args.mode == "train":
-        train(args.root_path, args.batch_size, args.num_epochs, args.lr, args.load_weights, args.path_weights)
-
-    elif args.mode == "eval_caption":
-        # Gọi evaluate caption
-        os.system(f"python evaluate.py --root {args.root_path} --task caption --score {args.score}")
-
-    elif args.mode == "eval_concept":
-        # Gọi evaluate concept
-        os.system(f"python evaluate.py --root {args.root_path} --task concept")
+        train(args.root_path, args.batch_size, args.num_epochs, args.lr)
+    elif args.mode == "predict":
+        predict(args.root_path, split=args.split, task=args.task)
 
 if __name__ == "__main__":
     main()
