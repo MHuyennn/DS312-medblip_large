@@ -121,7 +121,7 @@ def main_evaluate(root_path, mode="caption", split="valid"):
         result_df = evaluate_concept(model, dataloader, device, mlb, name2cui)
         save_path = os.path.join(root_path, f"{split}_concepts_pred.csv")
         result_df.to_csv(save_path, index=False)
-        print(f"✅ Saved concept predictions at: {save_path}")
+        print(f" Saved concept predictions at: {save_path}")
 
 if __name__ == "__main__":
     import argparse
