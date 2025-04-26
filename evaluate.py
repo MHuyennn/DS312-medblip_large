@@ -1,195 +1,134 @@
 import os
-import csv
-import evaluate
-import numpy as np
+import torch
 import pandas as pd
-import re
-import warnings
 from tqdm import tqdm
-from sklearn.metrics import f1_score, precision_score, recall_score
+from transformers import AutoProcessor
+from dataset import ImgCaptionConceptDataset
 from sklearn.preprocessing import MultiLabelBinarizer
-import argparse
+import evaluate
 
-warnings.filterwarnings('ignore')
+def compute_caption_scores(predictions, references):
+    """Tính các chỉ số đánh giá caption prediction."""
+    scorer_rouge = evaluate.load("rouge")
+    scorer_bleu = evaluate.load("bleu")
+    scorer_bertscore = evaluate.load("bertscore")
+    scorer_meteor = evaluate.load("meteor")
+    scorer_cider = evaluate.load("cider")
+    scorer_spice = evaluate.load("spice")
 
-### ====== PHẦN CHẤM CAPTION (GIỮ NGUYÊN) ====== ###
-def preprocess_sentences(sentences):
-    processed_sentences = []
-    for sentence in sentences:
-        sentence = sentence.lower()
-        sentence = re.sub(r'[^\w\s]', '', sentence)
-        sentence = re.sub(r'\b\d+\b', '<n>', sentence)
-        sentence_words = sentence.split()
-        cleaned_words = []
-        previous_word = None
-        for word in sentence_words:
-            if word != previous_word:
-                cleaned_words.append(word)
-            previous_word = word
-        cleaned_sentence = ' '.join(cleaned_words)
-        processed_sentences.append(cleaned_sentence)
-    return processed_sentences
+    results = {}
+    results.update(scorer_rouge.compute(predictions=predictions, references=references))
+    results.update(scorer_bleu.compute(predictions=predictions, references=references))
+    results.update(scorer_bertscore.compute(predictions=predictions, references=references, lang="en"))
+    results.update(scorer_meteor.compute(predictions=predictions, references=references))
+    results.update(scorer_cider.compute(predictions=predictions, references=references))
+    results.update(scorer_spice.compute(predictions=predictions, references=references))
 
-def preprocess_df(df):
-    df['processed_Caption'] = preprocess_sentences(df['Caption'])
-    return df
+    return results
 
-def BERTscore(bertscore, valid_captions, cands):
-    scores = []
-    for i in tqdm(range(len(cands["Caption"]))):
-        bert = bertscore.compute(
-            predictions=[cands["Caption"][i]],
-            lang="en",
-            model_type="microsoft/deberta-xlarge-mnli",
-            references=[valid_captions["Caption"][i]]
-        )
-        scores.append(bert["f1"][0])
-    return scores
+def evaluate_caption(model, dataloader, processor, device):
+    model.eval()
+    preds = []
+    gts = []
+    ids = []
 
-def evaluate_caption(root, score_type):
-    print(f" Đang đánh giá caption với phương pháp {score_type.upper()}")
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating Caption"):
+            pixel_values = batch["pixel_values"].to(device)
+            input_ids = batch["input_ids"].to(device)
 
-    valid_captions = pd.read_csv(os.path.join(root, "valid_captions.csv"))
-    valid_captions = preprocess_df(valid_captions)
+            outputs = model(pixel_values, input_ids=input_ids, attention_mask=batch["attention_mask"].to(device), mode="caption")
+            generated_ids = torch.argmax(outputs["logits_caption"], dim=-1)
 
-    predictions = pd.read_csv(os.path.join(root, "results/valid_captions.csv"))
-    predictions = preprocess_df(predictions)
+            captions = processor.batch_decode(generated_ids, skip_special_tokens=True)
+            references = processor.batch_decode(batch["labels_caption"], skip_special_tokens=True)
 
-    bleu = evaluate.load("bleu")
-    rouge = evaluate.load("rouge")
-    meteor = evaluate.load("meteor")
-    bertscore = evaluate.load("bertscore")
+            preds.extend(captions)
+            gts.extend(references)
+            ids.extend(batch["id"])
 
-    if score_type == 'rouge':
-        result = rouge.compute(predictions=predictions["Caption"], references=valid_captions["Caption"])
-        print("ROUGE-1:", round(result["rouge1"], 6))
-        print("ROUGE-L:", round(result["rougeL"], 6))
+    result_df = pd.DataFrame({"ID": ids, "Caption": preds})
+    metrics = compute_caption_scores(preds, gts)
 
-    elif score_type == 'bleu':
-        result = bleu.compute(predictions=predictions["Caption"], references=valid_captions["Caption"])
-        print("BLEU Precision-1:", round(result["precisions"][0], 6))
+    return result_df, metrics
 
-    elif score_type == 'meteor':
-        result = meteor.compute(predictions=predictions["Caption"], references=valid_captions["Caption"])
-        print("METEOR:", round(result["meteor"], 6))
+def evaluate_concept(model, dataloader, device, mlb, name2cui):
+    model.eval()
+    preds = []
+    ids = []
 
-    elif score_type == 'bertscore':
-        result = BERTscore(bertscore, valid_captions, predictions)
-        print("BERTScore (avg F1):", round(np.average(result), 6))
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating Concept"):
+            pixel_values = batch["pixel_values"].to(device)
+            id_list = batch["id"]
 
-### ====== PHẦN CHẤM CONCEPT CHUẨN IMAGECLEF ====== ###
-class ConceptEvaluator:
-    def __init__(self, ground_truth_path, secondary_ground_truth_path):
-        self.ground_truth_path = ground_truth_path
-        self.ground_truth_path_secondary = secondary_ground_truth_path
-        self.gt = self.load_gt(self.ground_truth_path)
-        self.gt_secondary = self.load_gt(self.ground_truth_path_secondary)
+            logits = model(pixel_values, mode="concept")["logits_concept"]
+            probs = torch.sigmoid(logits).cpu()
 
-    def _evaluate(self, prediction_path):
-        predictions = self.load_predictions(prediction_path)
-        score = self.compute_primary_score(predictions)
-        score_secondary = self.compute_secondary_score(predictions)
-        return score, score_secondary
+            pred_labels = (probs > 0.5).int()
 
-    def load_gt(self, path):
-        gt = {}
-        with open(path) as csvfile:
-            reader = csv.reader(csvfile)
-            for row in reader:
-                if "ID" not in row[0]:
-                    image_id = row[0]
-                    concepts = tuple(concept.strip() for concept in row[1].split(";")) if len(row) > 1 else tuple()
-                    gt[image_id] = concepts
-        return gt
+            pred_concepts = mlb.inverse_transform(pred_labels.numpy())
 
-    def load_predictions(self, submission_file_path):
-        predictions = {}
-        image_ids_gt = tuple(self.gt.keys())
-        max_num_concepts = 100
-        with open(submission_file_path) as csvfile:
-            reader = csv.reader(csvfile)
-            lineCnt = 0
-            for row in reader:
-                if "ID" not in row[0]:
-                    lineCnt += 1
-                    if not 1 <= len(row) <= 2:
-                        raise Exception(f"Wrong format at line {lineCnt}")
-                    image_id = row[0]
-                    if image_id not in image_ids_gt:
-                        raise Exception(f"Image ID {image_id} không tồn tại trong tập test tại dòng {lineCnt}")
-                    if image_id in predictions:
-                        raise Exception(f"Image ID {image_id} bị trùng tại dòng {lineCnt}")
-                    concepts = tuple(con.strip() for con in row[1].split(";")) if len(row) > 1 else tuple()
-                    if len(concepts) > max_num_concepts:
-                        raise Exception(f"Dòng {lineCnt} có quá nhiều concept (>100)")
-                    if len(concepts) != len(set(concepts)):
-                        raise Exception(f"Dòng {lineCnt} có concept bị lặp")
-                    predictions[image_id] = concepts
-            if len(predictions) != len(image_ids_gt):
-                raise Exception(f"Số lượng ảnh không khớp ground truth: {len(predictions)} vs {len(image_ids_gt)}")
-        return predictions
+            for id_val, concept_names in zip(id_list, pred_concepts):
+                cuis = [name2cui.get(name, "Unknown") for name in concept_names]
+                preds.append(";".join(cuis))
+                ids.append(id_val)
 
-    def compute_primary_score(self, predictions):
-        max_score = len(self.gt)
-        current_score = 0
-        for image_id in predictions:
-            pred = tuple(con.upper() for con in predictions[image_id])
-            gt = tuple(con.upper() for con in self.gt[image_id])
-            if len(gt) == 0:
-                max_score -= 1
-                continue
-            all_concepts = sorted(list(set(gt + pred)))
-            y_true = [int(c in gt) for c in all_concepts]
-            y_pred = [int(c in pred) for c in all_concepts]
-            f1score = f1_score(y_true, y_pred, average="binary")
-            current_score += f1score
-        return current_score / max_score
+    result_df = pd.DataFrame({"ID": ids, "CUIs": preds})
+    return result_df
 
-    def compute_secondary_score(self, predictions):
-        max_score = len(self.gt_secondary)
-        current_score = 0
-        allowed_concepts = {
-            "C0002978", "C0040405", "C0024485", "C0032743", "C0041618", "C1306645",
-            "C1140618", "C0037949", "C0030797", "C0023216", "C0037303", "C0817096",
-            "C0006141", "C0000726", "C0920367"
-        }
-        for image_id in predictions:
-            pred = tuple(con.upper() for con in predictions[image_id])
-            gt = tuple(con.upper() for con in self.gt_secondary[image_id])
-            pred = tuple(c for c in pred if c in allowed_concepts)
-            gt = tuple(c for c in gt if c in allowed_concepts)
-            if len(gt) == 0:
-                max_score -= 1
-                continue
-            all_concepts = sorted(list(set(gt + pred)))
-            y_true = [int(c in gt) for c in all_concepts]
-            y_pred = [int(c in pred) for c in all_concepts]
-            f1score = f1_score(y_true, y_pred, average="binary")
-            current_score += f1score
-        return current_score / max_score
+def main_evaluate(root_path, mode="caption", split="valid"):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def evaluate_concept_official(root):
-    gt_path = os.path.join(root, "valid/valid_concepts.csv")
-    secondary_gt_path = os.path.join(root, "valid/concepts_manual.csv")
-    pred_path = os.path.join(root, "results/valid_concepts.csv")
-    evaluator = ConceptEvaluator(gt_path, secondary_gt_path)
-    score, score_secondary = evaluator._evaluate(pred_path)
-    print(f" Concept Detection:")
-    print(f" - Primary Score (Official F1):     {score:.4f}")
-    print(f" - Secondary Score (Allowed only):  {score_secondary:.4f}")
+    img_dir = os.path.join(root_path, split, split)
+    caption_csv = os.path.join(img_dir, f"{split}_captions.csv")
+    concept_csv = os.path.join(img_dir, f"{split}_concepts.csv")
+    cui_names_csv = os.path.join(root_path, "cui_names.csv")
 
-### ====== MAIN CLI ====== ###
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--root', type=str, default='./')
-    parser.add_argument('--task', type=str, choices=['caption', 'concept'], default='caption')
-    parser.add_argument('--score', type=str, default='rouge', help="Chỉ dùng cho caption: rouge/bleu/meteor/bertscore")
-    args = parser.parse_args()
+    df_cap = pd.read_csv(caption_csv)
+    df_con = pd.read_csv(concept_csv)
+    df_cui = pd.read_csv(cui_names_csv)
 
-    if args.task == "caption":
-        evaluate_caption(args.root, args.score)
-    elif args.task == "concept":
-        evaluate_concept_official(args.root)
+    cui2name = dict(zip(df_cui["CUI"], df_cui["Name"]))
+    name2cui = dict(zip(df_cui["Name"], df_cui["CUI"]))
+
+    # Merge caption + concepts
+    df = pd.merge(df_cap, df_con, on="ID")
+    df["Concept_Names"] = df["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
+
+    processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+
+    name_list = df_cui["Name"].tolist()
+    mlb = MultiLabelBinarizer(classes=name_list)
+    mlb.fit(df["Concept_Names"])
+
+    dataset = ImgCaptionConceptDataset(df, img_dir, processor, name_list, mlb, mode=split)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=False)
+
+    model = torch.load(os.path.join(root_path, "model_best.pth"), map_location=device)  # Load model checkpoint
+    model.to(device)
+
+    if mode == "caption":
+        result_df, metrics = evaluate_caption(model, dataloader, processor, device)
+        save_path = os.path.join(root_path, f"{split}_captions_pred.csv")
+        result_df.to_csv(save_path, index=False)
+        print(f" Saved caption predictions at: {save_path}")
+        print(" Caption Evaluation Metrics:")
+        for k, v in metrics.items():
+            print(f"{k}: {v:.4f}")
+
+    elif mode == "concept":
+        result_df = evaluate_concept(model, dataloader, device, mlb, name2cui)
+        save_path = os.path.join(root_path, f"{split}_concepts_pred.csv")
+        result_df.to_csv(save_path, index=False)
+        print(f"✅ Saved concept predictions at: {save_path}")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=str, required=True, help="Root path chứa dữ liệu")
+    parser.add_argument("--task", type=str, choices=["caption", "concept"], required=True, help="Chọn task")
+    parser.add_argument("--split", type=str, default="valid", help="valid hoặc test")
+    args = parser.parse_args()
+
+    main_evaluate(args.root, mode=args.task, split=args.split)
