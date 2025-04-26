@@ -33,7 +33,7 @@ def train(root_path, batch_size=4, num_epochs=2, lr=1e-5, load_weights=False, pa
     train_dir = os.path.join(root_path, "train/train")
     train_captions = os.path.join(train_dir, "train_captions.csv")
     train_concepts = os.path.join(train_dir, "train_concepts.csv")
-    cui_names = os.path.join("cui_names.csv") 
+    cui_names = os.path.join(root_path,"cui_names.csv") 
 
     df_cap = pd.read_csv(train_captions)
     df_con = pd.read_csv(train_concepts)
