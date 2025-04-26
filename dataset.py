@@ -1,66 +1,83 @@
-import cv2
 import os
-import numpy as np
+import pandas as pd
 import torch
+import cv2
 from torch.utils.data import Dataset
 
 class ImgCaptionConceptDataset(Dataset):
-    """Dataset hỗ trợ đồng thời caption prediction và concept detection."""
-    def __init__(self, 
-                 df, 
-                 path,
-                 processor=None,
-                 mlb=None,
-                 image_size=(224, 224),
-                 max_length=100):
-        self.df = df
-        self.image_size = image_size 
-        self.max_length = max_length
+    """Dataset dùng cho đồng thời caption prediction và concept detection."""
+
+    def __init__(self, dataframe, img_dir, processor, name_list, mlb, image_size=(224, 224), max_length=100, mode="train"):
+        """
+        Args:
+            dataframe (pd.DataFrame): Dataframe đã merge từ caption.csv và concept.csv.
+            img_dir (str): Đường dẫn chứa ảnh.
+            processor: BLIP processor.
+            name_list (list): Danh sách các concept Name đã map từ cui_names.csv.
+            mlb: MultiLabelBinarizer fitted trên Name.
+            image_size (tuple): Kích thước resize ảnh.
+            max_length (int): Độ dài tối đa của caption tokenized.
+            mode (str): 'train', 'valid', 'test'.
+        """
+        self.df = dataframe
+        self.img_dir = img_dir
         self.processor = processor
-        self.path = path
-        self.ids = list(self.df["ID"])
-
-        self.df["CUI_list"] = self.df["CUIs"]
-
-        # Không fit MultiLabelBinarizer ở đây nữa, mà nhận mlb từ ngoài
+        self.name_list = name_list
         self.mlb = mlb
-        self.label_matrix = self.mlb.transform(self.df["CUI_list"])
-
-        self.classes_ = self.mlb.classes_
-
-    def get_caption_by_id(self, idx):
-        return self.df["Caption"].iloc[idx]
-
-    def get_image_by_id(self, idx):
-        iid = self.df["ID"].iloc[idx]
-        img_path = os.path.join(self.path, str(iid) + ".jpg")
-        image = cv2.imread(img_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Chuyển sang RGB đúng chuẩn
-        image = cv2.resize(image, self.image_size)
-        return image
-    
-    def get_multilabel_vector(self, idx):
-        return torch.tensor(self.label_matrix[idx], dtype=torch.float)
+        self.image_size = image_size
+        self.max_length = max_length
+        self.mode = mode
 
     def __len__(self):
-        return len(self.ids)
-    
+        return len(self.df)
+
     def __getitem__(self, idx):
-        image = self.get_image_by_id(idx)
-        caption = self.get_caption_by_id(idx)
+        row = self.df.iloc[idx]
 
-        # Tokenize input image + caption
-        encoding = self.processor(
-            images=image,
-            text=caption,
-            padding="max_length",
-            truncation="longest_first",
-            max_length=self.max_length,
-            return_tensors="pt"
-        )
-        encoding = {k: v.squeeze() for k, v in encoding.items()}
+        img_path = os.path.join(self.img_dir, f"{row['ID']}.jpg")
+        image = cv2.imread(img_path)
+        if image is None:
+            raise ValueError(f"Ảnh {img_path} không tồn tại hoặc lỗi khi đọc.")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        image = cv2.resize(image, self.image_size)
 
-        # Thêm nhãn concept (multi-label)
-        encoding["labels_concept"] = self.get_multilabel_vector(idx)
+        pixel_values = self.processor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
+
+        encoding = {
+            "pixel_values": pixel_values,
+            "id": row["ID"]
+        }
+
+        if self.mode != "test":
+            caption = row["Caption"]
+            input_ids = self.processor.tokenizer(
+                caption,
+                padding="max_length",
+                max_length=self.max_length,
+                truncation=True,
+                return_tensors="pt"
+            ).input_ids.squeeze(0)
+
+            attention_mask = self.processor.tokenizer(
+                caption,
+                padding="max_length",
+                max_length=self.max_length,
+                truncation=True,
+                return_tensors="pt"
+            ).attention_mask.squeeze(0)
+
+            labels_caption = input_ids.clone()
+            labels_caption[labels_caption == self.processor.tokenizer.pad_token_id] = -100
+
+            # Chuyển concept Name thành multi-hot vector
+            concept_names = row["Concept_Names"] if isinstance(row["Concept_Names"], list) else []
+            concept_vector = self.mlb.transform([concept_names])[0]
+
+            encoding.update({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels_caption": labels_caption,
+                "labels_concept": torch.tensor(concept_vector, dtype=torch.float)
+            })
 
         return encoding
