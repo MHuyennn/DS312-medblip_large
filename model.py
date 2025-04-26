@@ -1,29 +1,53 @@
 import torch
 import torch.nn as nn
+from transformers import BlipForConditionalGeneration
 
 class MedBLIPMultitask(nn.Module):
-    def __init__(self, vision_encoder, text_decoder, processor):
-        super(MedBLIPMultitask, self).__init__()
-        self.vision_encoder = vision_encoder
-        self.text_decoder = text_decoder
+    """Mô hình kết hợp BLIP cho Caption + Concept Detection song song."""
+
+    def __init__(self, vision_encoder, text_decoder, processor, hidden_dim=768):
+        super().__init__()
         self.processor = processor
-        self.concept_embeddings = None  # Sẽ set từ bên ngoài bằng set_concept_embeddings()
 
-    def set_concept_embeddings(self, embedding_tensor):
-        self.concept_embeddings = embedding_tensor  # (num_concepts, hidden_dim)
+        # Encoder hình ảnh BLIP
+        self.vision_encoder = vision_encoder
 
-    def forward(self, pixel_values, input_ids=None, attention_mask=None, mode="caption"):
-        image_embeds = self.vision_encoder(pixel_values=pixel_values).last_hidden_state[:, 0, :]  # CLS token
+        # Caption Decoder
+        self.text_decoder = text_decoder
 
-        if mode == "caption":
-            decoder_output = self.text_decoder(input_ids=input_ids,
-                                               attention_mask=attention_mask,
-                                               encoder_hidden_states=image_embeds.unsqueeze(1),
-                                               encoder_attention_mask=torch.ones_like(pixel_values[:, 0, 0]))
-            return decoder_output
+        # Concept Detection Head
+        self.concept_projection = nn.Linear(hidden_dim, hidden_dim)
+        self.concept_embeddings = None  # sẽ set sau bằng Name embeddings
 
-        elif mode == "concept":
-            if self.concept_embeddings is None:
-                raise ValueError("Concept embeddings chưa được set!")
-            logits = torch.matmul(image_embeds, self.concept_embeddings.T)  # (B, num_concepts)
-            return logits
+    def set_concept_embeddings(self, embeddings):
+        """Nhận embedding vector từ các concept Name."""
+        self.concept_embeddings = embeddings  # (num_concept, hidden_dim)
+
+    def forward(self, pixel_values, input_ids=None, attention_mask=None, mode="train"):
+        # Trích xuất đặc trưng hình ảnh
+        vision_outputs = self.vision_encoder(pixel_values=pixel_values)
+        image_embeds = vision_outputs.last_hidden_state[:, 0, :]  # lấy CLS token (batch_size, hidden_dim)
+
+        outputs = {}
+
+        # Caption prediction branch
+        if mode in ["train", "caption"]:
+            caption_outputs = self.text_decoder(
+                encoder_hidden_states=image_embeds.unsqueeze(1),
+                encoder_attention_mask=torch.ones(image_embeds.size(0), 1).to(image_embeds.device),
+                labels=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True
+            )
+            outputs["loss_caption"] = caption_outputs.loss
+            outputs["logits_caption"] = caption_outputs.logits
+
+        # Concept detection branch
+        if mode in ["train", "concept"]:
+            assert self.concept_embeddings is not None, "Concept embeddings chưa được set!"
+
+            image_proj = self.concept_projection(image_embeds)  # (batch_size, hidden_dim)
+            logits_concept = torch.matmul(image_proj, self.concept_embeddings.T)  # (batch_size, num_concepts)
+            outputs["logits_concept"] = logits_concept
+
+        return outputs
