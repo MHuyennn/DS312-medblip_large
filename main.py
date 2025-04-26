@@ -13,21 +13,21 @@ from model import MedBLIPMultitask
 from evaluate import evaluate_caption, evaluate_concept
 
 def load_cui_name_embeddings(df_cui, processor, device):
+    """Tạo embeddings từ danh sách Name concepts."""
     names = df_cui["Name"].tolist()
     inputs = processor.tokenizer(names, padding=True, truncation=True, return_tensors="pt").to(device)
 
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
     
-    input_embeddings = model.text_decoder.get_input_embeddings()(inputs.input_ids)  # (batch_size, seq_len, hidden_dim)
-
-    name_embeddings = input_embeddings.mean(dim=1)  # Trung bình các token
+    input_embeddings = model.text_decoder.get_input_embeddings()(inputs.input_ids)
+    name_embeddings = input_embeddings.mean(dim=1)  # Trung bình theo chiều sequence
 
     return name_embeddings, names
 
 def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_best.pth"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1. Load data
+    # Load data
     train_img_dir = os.path.join(root_path, "train/train")
     valid_img_dir = os.path.join(root_path, "valid/valid")
     caption_train_csv = os.path.join(train_img_dir, "train_captions.csv")
@@ -42,7 +42,6 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     df_con_valid = pd.read_csv(concept_valid_csv)
     df_cui = pd.read_csv(cui_names_csv)
 
-    # 2. Map CUIs thành Name
     cui2name = dict(zip(df_cui["CUI"], df_cui["Name"]))
     df_train = pd.merge(df_cap_train, df_con_train, on="ID")
     df_valid = pd.merge(df_cap_valid, df_con_valid, on="ID")
@@ -53,32 +52,31 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     name_embeddings, name_list = load_cui_name_embeddings(df_cui, processor, device)
 
-    # 3. MultiLabelBinarizer
+    name_list = list(set(name_list))  # <-- QUAN TRỌNG: bỏ trùng name trước khi dùng MultiLabelBinarizer
+
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
 
-    # 4. Dataset và DataLoader
+    # Datasets
     train_dataset = ImgCaptionConceptDataset(df_train, train_img_dir, processor, name_list, mlb, mode="train")
     valid_dataset = ImgCaptionConceptDataset(df_valid, valid_img_dir, processor, name_list, mlb, mode="valid")
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False)
 
-    # 5. Model
+    # Model
     blip_base = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
     model = MedBLIPMultitask(
         vision_encoder=blip_base.vision_model,
         text_decoder=blip_base.text_decoder,
         processor=processor
     ).to(device)
-
     model.set_concept_embeddings(name_embeddings)
 
-    # 6. Optimizer và Loss
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     criterion_concept = nn.BCEWithLogitsLoss()
 
-    # 7. Training loop
+    # Training loop
     best_loss = float('inf')
     for epoch in range(num_epochs):
         model.train()
@@ -112,10 +110,10 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model, save_path)
-            print(f"Saved best model to {save_path}")
+            print(f"✅ Saved best model to {save_path}")
 
 def predict(root_path, split="test", task="caption", batch_size=4):
-    """Predict caption hoặc concept."""
+    """Predict caption hoặc concept detection."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     img_dir = os.path.join(root_path, split, split)
@@ -126,13 +124,11 @@ def predict(root_path, split="test", task="caption", batch_size=4):
 
     name_list = list(set(df_cui["Name"].tolist()))
     mlb = MultiLabelBinarizer(classes=name_list)
-    mlb.fit([])  # Empty fit để giữ đúng thứ tự classes
+    mlb.fit([])  # Empty fit để giữ thứ tự class
 
-    # Load model
     model = torch.load(os.path.join(root_path, "model_best.pth"), map_location=device)
     model.to(device)
 
-    # Load image ID
     ids = [os.path.splitext(f)[0] for f in os.listdir(img_dir) if f.endswith(".jpg")]
     df_test = pd.DataFrame({"ID": ids})
     df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
@@ -150,7 +146,7 @@ def predict(root_path, split="test", task="caption", batch_size=4):
         save_path = os.path.join(root_path, f"{split}_concepts_pred.csv")
     
     result_df.to_csv(save_path, index=False)
-    print(f"Saved predictions to {save_path}")
+    print(f"✅ Saved predictions to {save_path}")
 
 def main():
     parser = argparse.ArgumentParser()
