@@ -124,7 +124,7 @@ def predict(root_path, split="test", task="caption", batch_size=4):
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
-    name_list = df_cui["Name"].tolist()
+    name_list = list(set(df_cui["Name"].tolist()))
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit([])  # Empty fit để giữ đúng thứ tự classes
 
