@@ -63,7 +63,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     # Tạo name_list từ df_cui_train
     name_list = df_cui_train["Name"].tolist()
 
-    # Kiểm tra trùng lặp (để debug)
+    # Kiểm tra trùng lặp
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
@@ -107,9 +107,19 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
             labels_caption = batch["labels_caption"].to(device)
             labels_concept = batch["labels_concept"].to(device)
 
-            outputs = model(pixel_values, input_ids=input_ids, attention_mask=attention_mask, mode="train")
+            outputs = model(
+                pixel_values,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels_caption=labels_caption,  # Truyền labels_caption
+                mode="train"
+            )
             loss_caption = outputs["loss_caption"]
             logits_concept = outputs["logits_concept"]
+
+            # Kiểm tra loss_caption
+            if loss_caption is None:
+                raise ValueError("loss_caption is None. Check model output or input data.")
 
             # Loss concept
             loss_concept = criterion_concept(logits_concept, labels_concept)
@@ -142,7 +152,7 @@ def predict(root_path, split="test", task="caption", batch_size=4):
     # Lấy danh sách tên duy nhất từ df_cui
     name_list = list(df_cui["Name"].drop_duplicates())
 
-    # Kiểm tra trùng lặp (để debug)
+    # Kiểm tra trùng lặp
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 

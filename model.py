@@ -13,7 +13,7 @@ class MedBLIPMultitask(nn.Module):
         """Set precomputed concept embeddings (Name embeddings)."""
         self.concept_embeddings = nn.Parameter(embeddings, requires_grad=False)
 
-    def forward(self, pixel_values, input_ids=None, attention_mask=None, mode="train"):
+    def forward(self, pixel_values, input_ids=None, attention_mask=None, labels_caption=None, mode="train"):
         # Encode image
         image_outputs = self.vision_encoder(pixel_values=pixel_values)
         image_features = image_outputs.last_hidden_state[:, 0, :]  # CLS token features
@@ -22,8 +22,9 @@ class MedBLIPMultitask(nn.Module):
             # Caption Prediction
             caption_outputs = self.text_decoder(
                 encoder_hidden_states=image_features.unsqueeze(1),  # Unsqueeze cho đúng shape
-                input_ids=input_ids,  # Đây là chỗ quan trọng: truyền labels_caption làm input_ids
+                input_ids=input_ids,
                 attention_mask=attention_mask,
+                labels=labels_caption  # Truyền labels_caption để tính loss
             )
             loss_caption = caption_outputs.loss
 
@@ -32,6 +33,7 @@ class MedBLIPMultitask(nn.Module):
 
             return {
                 "loss_caption": loss_caption,
+                "logits_caption": caption_outputs.logits,  # Thêm logits_caption nếu cần
                 "logits_concept": logits_concept
             }
 
@@ -42,9 +44,9 @@ class MedBLIPMultitask(nn.Module):
                 max_length=50,
                 num_beams=3,
             )
-            return generated_ids
+            return {"generated_ids": generated_ids}
 
         elif mode == "predict_concept":
             # Dự đoán concept detection
             logits_concept = torch.matmul(image_features, self.concept_embeddings.T)
-            return logits_concept
+            return {"logits_concept": logits_concept}

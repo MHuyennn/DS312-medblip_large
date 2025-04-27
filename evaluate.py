@@ -37,8 +37,13 @@ def evaluate_caption(model, dataloader, processor, device):
             pixel_values = batch["pixel_values"].to(device)
             input_ids = batch["input_ids"].to(device)
 
-            outputs = model(pixel_values, input_ids=input_ids, attention_mask=batch["attention_mask"].to(device), mode="caption")
-            generated_ids = torch.argmax(outputs["logits_caption"], dim=-1)
+            outputs = model(
+                pixel_values,
+                input_ids=input_ids,
+                attention_mask=batch["attention_mask"].to(device),
+                mode="predict_caption"  # Sửa mode để khớp với model.py
+            )
+            generated_ids = outputs["generated_ids"]
 
             captions = processor.batch_decode(generated_ids, skip_special_tokens=True)
             references = processor.batch_decode(batch["labels_caption"], skip_special_tokens=True)
@@ -62,7 +67,8 @@ def evaluate_concept(model, dataloader, device, mlb, name2cui):
             pixel_values = batch["pixel_values"].to(device)
             id_list = batch["id"]
 
-            logits = model(pixel_values, mode="concept")["logits_concept"]
+            outputs = model(pixel_values, mode="predict_concept")
+            logits = outputs["logits_concept"]
             probs = torch.sigmoid(logits).cpu()
 
             pred_labels = (probs > 0.5).int()
@@ -101,7 +107,7 @@ def main_evaluate(root_path, mode="caption", split="valid"):
     # Lấy danh sách tên duy nhất từ df_cui
     name_list = list(df_cui["Name"].drop_duplicates())
 
-    # Kiểm tra trùng lặp (để debug)
+    # Kiểm tra trùng lặp
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
@@ -111,7 +117,7 @@ def main_evaluate(root_path, mode="caption", split="valid"):
     dataset = ImgCaptionConceptDataset(df, img_dir, processor, name_list, mlb, mode=split)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=False)
 
-    model = torch.load(os.path.join(root_path, "model_best.pth"), map_location=device)  # Load model checkpoint
+    model = torch.load(os.path.join(root_path, "model_best.pth"), map_location=device)
     model.to(device)
 
     if mode == "caption":
