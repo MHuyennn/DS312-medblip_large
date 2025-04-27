@@ -51,18 +51,25 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
-    # ⚡ Sửa đúng bài
+    # Lấy danh sách concept names từ tập train
     concept_names_in_train = set()
     for concept_list in df_train["Concept_Names"]:
         concept_names_in_train.update(concept_list)
     concept_names_in_train = list(concept_names_in_train)
 
-    df_cui_train = df_cui[df_cui["Name"].isin(concept_names_in_train)].reset_index(drop=True)
-
+    # Lọc df_cui và loại bỏ trùng lặp dựa trên Name
+    df_cui_train = df_cui[df_cui["Name"].isin(concept_names_in_train)].drop_duplicates(subset=["Name"]).reset_index(drop=True)
+    
+    # Tạo name_list từ df_cui_train
     name_list = df_cui_train["Name"].tolist()
+
+    # Kiểm tra trùng lặp (để debug)
+    if len(name_list) != len(set(name_list)):
+        raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
     name_embeddings, _ = load_cui_name_embeddings(df_cui_train, processor, device)
 
+    # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
 
@@ -104,7 +111,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
             loss_caption = outputs["loss_caption"]
             logits_concept = outputs["logits_concept"]
 
-            # loss concept
+            # Loss concept
             loss_concept = criterion_concept(logits_concept, labels_concept)
 
             loss = loss_caption + loss_concept
@@ -132,7 +139,13 @@ def predict(root_path, split="test", task="caption", batch_size=4):
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
-    name_list = list(set(df_cui["Name"].tolist()))
+    # Lấy danh sách tên duy nhất từ df_cui
+    name_list = list(df_cui["Name"].drop_duplicates())
+
+    # Kiểm tra trùng lặp (để debug)
+    if len(name_list) != len(set(name_list)):
+        raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
+
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit([])  # Empty fit để giữ thứ tự class
 

@@ -98,7 +98,13 @@ def main_evaluate(root_path, mode="caption", split="valid"):
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
 
-    name_list = df_cui["Name"].tolist()
+    # Lấy danh sách tên duy nhất từ df_cui
+    name_list = list(df_cui["Name"].drop_duplicates())
+
+    # Kiểm tra trùng lặp (để debug)
+    if len(name_list) != len(set(name_list)):
+        raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
+
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df["Concept_Names"])
 
