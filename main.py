@@ -203,7 +203,12 @@ def main():
         processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-        model = torch.load("model_best.pth", map_location="/kaggle/input/med/pytorch/default/1")
+        model_path = "/kaggle/input/med/pytorch/default/1/model_best.pth"  # Update this path
+        try:
+            model = torch.load(model_path, map_location=device)
+        except FileNotFoundError:
+            print(f"Error: Model file not found at {model_path}")
+            return
         model.eval()
     
         test_img_dir = os.path.join(args.root_path, "test/test")
