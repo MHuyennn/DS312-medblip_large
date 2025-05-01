@@ -203,20 +203,27 @@ def main():
         processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-        model_path = "/kaggle/input/med/pytorch/default/1/model_best.pth"  # Update this path
+        # Sử dụng args.cui_path thay vì cui_path
+        cui_path = args.cui_path if args.cui_path else args.root_path
+        cui_names_csv = os.path.join(cui_path, "cui_names.csv")
+    
+        # Đảm bảo đường dẫn model đúng
+        model_path = "/kaggle/input/med/pytorch/default/1/model_best.pth"  # Cập nhật đường dẫn này
         try:
             model = torch.load(model_path, map_location=device)
         except FileNotFoundError:
-            print(f"Error: Model file not found at {model_path}")
+            print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
             return
         model.eval()
     
         test_img_dir = os.path.join(args.root_path, "test/test")
-        cui_path = cui_path if cui_path else root_path
-        cui_names_csv = os.path.join(cui_path, "cui_names.csv")
-
-        df_cui = pd.read_csv(cui_csv)
-        name_list = list(df_cui["Name"])
+    
+        df_cui = pd.read_csv(cui_names_csv)
+        name_list = list(df_cui["Name"].drop_duplicates())
+    
+        # Kiểm tra trùng lặp
+        if len(name_list) != len(set(name_list)):
+            raise ValueError(f"Tìm thấy tên trùng lặp trong name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
     
         # Load embeddings
         embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
@@ -237,7 +244,7 @@ def main():
         concept_preds = []
     
         with torch.no_grad():
-            for batch in tqdm(loader, desc="Predicting"):
+            for batch in tqdm(loader, desc="Dự đoán"):
                 pixel_values = batch["pixel_values"].to(device)
                 ids = batch["id"]
     
@@ -271,7 +278,10 @@ def main():
         pd.DataFrame(caption_preds).to_csv("outputs/caption_predictions.csv", index=False)
         pd.DataFrame(concept_preds).to_csv("outputs/concept_predictions.csv", index=False)
     
-        print("✅ Done. Saved both predictions to outputs/")
+        print("✅ Hoàn tất. Đã lưu dự đoán vào outputs/")
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
