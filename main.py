@@ -203,7 +203,7 @@ def main():
         processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-        model = torch.load("model_best.pth", map_location=device)
+        model = torch.load("model_best.pth", map_location="/kaggle/input/med/pytorch/default/1")
         model.eval()
     
         test_img_dir = os.path.join(args.root_path, "test/test")
