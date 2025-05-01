@@ -34,7 +34,9 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     concept_train_csv = os.path.join(train_img_dir, "train_concepts.csv")
     caption_valid_csv = os.path.join(valid_img_dir, "valid_captions.csv")
     concept_valid_csv = os.path.join(valid_img_dir, "valid_concepts.csv")
-    cui_names_csv = os.path.join(root_path, "cui_names.csv")
+    cui_path = cui_path if cui_path else root_path
+    cui_names_csv = os.path.join(cui_path, "cui_names.csv")
+
 
     df_cap_train = pd.read_csv(caption_train_csv)
     df_con_train = pd.read_csv(concept_train_csv)
@@ -144,7 +146,9 @@ def predict(root_path, split="test", task="caption", batch_size=4):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     img_dir = os.path.join(root_path, split, split)
-    cui_names_csv = os.path.join(root_path, "cui_names.csv")
+    cui_path = cui_path if cui_path else root_path
+    cui_names_csv = os.path.join(cui_path, "cui_names.csv")
+
     df_cui = pd.read_csv(cui_names_csv)
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
@@ -185,6 +189,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", type=str, choices=["train", "predict"])
     parser.add_argument("--root_path", type=str, required=True)
+    parser.add_argument("--cui_path", type=str, default=None, help="Path to folder containing cui_names.csv")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-5)
@@ -202,7 +207,9 @@ def main():
         model.eval()
     
         test_img_dir = os.path.join(args.root_path, "test/test")
-        cui_csv = os.path.join(args.root_path, "cui_names.csv")
+        cui_path = cui_path if cui_path else root_path
+        cui_names_csv = os.path.join(cui_path, "cui_names.csv")
+
         df_cui = pd.read_csv(cui_csv)
         name_list = list(df_cui["Name"])
     
