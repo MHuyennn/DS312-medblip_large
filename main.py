@@ -194,8 +194,73 @@ def main():
 
     if args.mode == "train":
         train(args.root_path, args.batch_size, args.num_epochs, args.lr)
-    elif args.mode == "predict":
-        predict(args.root_path, split=args.split, task=args.task)
+    elif args.command == "predict":
+        processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+        model = torch.load("model_best.pth", map_location=device)
+        model.eval()
+    
+        test_img_dir = os.path.join(args.root_path, "test/test")
+        cui_csv = os.path.join(args.root_path, "cui_names.csv")
+        df_cui = pd.read_csv(cui_csv)
+        name_list = list(df_cui["Name"])
+    
+        # Load embeddings
+        embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
+        model.set_concept_embeddings(embeddings)
+    
+        mlb = MultiLabelBinarizer(classes=name_list)
+        mlb.fit([])
+    
+        test_ids = [f.split(".")[0] for f in os.listdir(test_img_dir) if f.endswith(".jpg")]
+        df_test = pd.DataFrame({"ID": test_ids})
+        df_test["Caption"] = [""] * len(df_test)
+        df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
+    
+        dataset = ImgCaptionConceptDataset(df_test, test_img_dir, processor, name_list, mlb, mode="test")
+        loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+    
+        caption_preds = []
+        concept_preds = []
+    
+        with torch.no_grad():
+            for batch in tqdm(loader, desc="Predicting"):
+                pixel_values = batch["pixel_values"].to(device)
+                ids = batch["id"]
+    
+                # Shared vision embedding
+                vision_out = model.vision_encoder(pixel_values=pixel_values)
+                vision_embeds = vision_out.last_hidden_state[:, 0, :]
+    
+                # Caption generation
+                gen_ids = model.text_decoder.generate(
+                    encoder_hidden_states=vision_out.last_hidden_state,
+                    max_length=100
+                )
+                captions = processor.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+    
+                # Concept prediction
+                logits = torch.matmul(vision_embeds, embeddings.T)
+                probs = torch.sigmoid(logits).cpu().numpy()
+    
+                for i in range(len(ids)):
+                    id = ids[i]
+    
+                    # Caption result
+                    caption_preds.append({"ID": id, "Caption": captions[i]})
+    
+                    # Concept result
+                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.5]
+                    cuis = [df_cui[df_cui["Name"] == n]["CUI"].values[0] for n in concept_names if n in df_cui["Name"].values]
+                    concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
+    
+        os.makedirs("outputs", exist_ok=True)
+        pd.DataFrame(caption_preds).to_csv("outputs/caption_predictions.csv", index=False)
+        pd.DataFrame(concept_preds).to_csv("outputs/concept_predictions.csv", index=False)
+    
+        print("✅ Done. Saved both predictions to outputs/")
+
 
 if __name__ == "__main__":
     main()
