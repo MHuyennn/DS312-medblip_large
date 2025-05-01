@@ -194,7 +194,7 @@ def main():
 
     if args.mode == "train":
         train(args.root_path, args.batch_size, args.num_epochs, args.lr)
-    elif args.command == "predict":
+    elif args.mode == "predict":
         processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
