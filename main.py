@@ -34,9 +34,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     concept_train_csv = os.path.join(train_img_dir, "train_concepts.csv")
     caption_valid_csv = os.path.join(valid_img_dir, "valid_captions.csv")
     concept_valid_csv = os.path.join(valid_img_dir, "valid_concepts.csv")
-    cui_path = cui_path if cui_path else root_path
-    cui_names_csv = os.path.join(cui_path, "cui_names.csv")
-
+    cui_names_csv = os.path.join(root_path, "cui_names.csv")
 
     df_cap_train = pd.read_csv(caption_train_csv)
     df_con_train = pd.read_csv(concept_train_csv)
@@ -113,7 +111,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
                 pixel_values,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                labels_caption=labels_caption,  # Truyền labels_caption
+                labels_caption=labels_caption,
                 mode="train"
             )
             loss_caption = outputs["loss_caption"]
@@ -141,49 +139,97 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
             torch.save(model, save_path)
             print(f"✅ Saved best model to {save_path}")
 
-def predict(root_path, split="test", task="caption", batch_size=4):
-    """Predict caption hoặc concept detection."""
+def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, model_path="./model_best.pth"):
+    """Predict caption and/or concept detection."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Đường dẫn dữ liệu
     img_dir = os.path.join(root_path, split, split)
     cui_path = cui_path if cui_path else root_path
     cui_names_csv = os.path.join(cui_path, "cui_names.csv")
 
-    df_cui = pd.read_csv(cui_names_csv)
-
+    # Tải processor và dữ liệu CUI
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-
-    # Lấy danh sách tên duy nhất từ df_cui
+    df_cui = pd.read_csv(cui_names_csv)
     name_list = list(df_cui["Name"].drop_duplicates())
 
     # Kiểm tra trùng lặp
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
-    mlb = MultiLabelBinarizer(classes=name_list)
-    mlb.fit([])  # Empty fit để giữ thứ tự class
-
-    model = torch.load(os.path.join(root_path, "model_best.pth"), map_location=device)
+    # Tải mô hình
+    try:
+        model = torch.load(model_path, map_location=device)
+    except FileNotFoundError:
+        print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
+        return
+    model.eval()
     model.to(device)
 
-    ids = [os.path.splitext(f)[0] for f in os.listdir(img_dir) if f.endswith(".jpg")]
-    df_test = pd.DataFrame({"ID": ids})
-    df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
+    # Tải embeddings
+    embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
+    model.set_concept_embeddings(embeddings)
+
+    # Khởi tạo MultiLabelBinarizer
+    mlb = MultiLabelBinarizer(classes=name_list)
+    mlb.fit([])
+
+    # Tạo dataset
+    test_ids = [f.split(".")[0] for f in os.listdir(img_dir) if f.endswith(".jpg")]
+    df_test = pd.DataFrame({"ID": test_ids})
     df_test["Caption"] = [""] * len(df_test)
+    df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
 
     dataset = ImgCaptionConceptDataset(df_test, img_dir, processor, name_list, mlb, mode="test")
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-    if task == "caption":
-        result_df, _ = evaluate_caption(model, dataloader, processor, device)
-        save_path = os.path.join(root_path, f"{split}_captions_pred.csv")
-    elif task == "concept":
-        name2cui = dict(zip(df_cui["Name"], df_cui["CUI"]))
-        result_df = evaluate_concept(model, dataloader, device, mlb, name2cui)
-        save_path = os.path.join(root_path, f"{split}_concepts_pred.csv")
-    
-    result_df.to_csv(save_path, index=False)
-    print(f"Saved predictions to {save_path}")
+    # Dự đoán
+    caption_preds = []
+    concept_preds = []
+
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="Dự đoán"):
+            pixel_values = batch["pixel_values"].to(device)
+            ids = batch["id"]
+
+            # Shared vision embedding
+            vision_out = model.vision_encoder(pixel_values=pixel_values)
+            vision_embeds = vision_out.last_hidden_state[:, 0, :]
+
+            # Caption prediction (nếu task là caption hoặc both)
+            if task in ["caption", "both"]:
+                gen_ids = model.text_decoder.generate(
+                    encoder_hidden_states=vision_out.last_hidden_state,
+                    max_length=100
+                )
+                captions = processor.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+
+            # Concept prediction (nếu task là concept hoặc both)
+            if task in ["concept", "both"]:
+                logits = torch.matmul(vision_embeds, embeddings.T)
+                probs = torch.sigmoid(logits).cpu().numpy()
+
+            for i in range(len(ids)):
+                id = ids[i]
+
+                # Caption result
+                if task in ["caption", "both"]:
+                    caption_preds.append({"ID": id, "Caption": captions[i]})
+
+                # Concept result
+                if task in ["concept", "both"]:
+                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.5]
+                    cuis = [df_cui[df_cui["Name"] == n]["CUI"].values[0] for n in concept_names if n in df_cui["Name"].values]
+                    concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
+
+    # Lưu kết quả
+    os.makedirs("outputs", exist_ok=True)
+    if task in ["caption", "both"]:
+        pd.DataFrame(caption_preds).to_csv("outputs/caption_predictions.csv", index=False)
+        print("✅ Đã lưu dự đoán chú thích vào outputs/caption_predictions.csv")
+    if task in ["concept", "both"]:
+        pd.DataFrame(concept_preds).to_csv("outputs/concept_predictions.csv", index=False)
+        print("✅ Đã lưu dự đoán khái niệm vào outputs/concept_predictions.csv")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -193,96 +239,15 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--task", type=str, choices=["caption", "concept"], default="caption")
+    parser.add_argument("--task", type=str, choices=["caption", "concept", "both"], default="both")
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
+    parser.add_argument("--model_path", type=str, default="./model_best.pth", help="Path to the trained model")
     args = parser.parse_args()
 
     if args.mode == "train":
-        train(args.root_path, args.batch_size, args.num_epochs, args.lr)
+        train(args.root_path, args.batch_size, args.num_epochs, args.lr, args.model_path)
     elif args.mode == "predict":
-        processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-        # Sử dụng args.cui_path thay vì cui_path
-        cui_path = args.cui_path if args.cui_path else args.root_path
-        cui_names_csv = os.path.join(cui_path, "cui_names.csv")
-    
-        # Đảm bảo đường dẫn model đúng
-        model_path = "/kaggle/input/med/pytorch/default/1/model_best.pth"  # Cập nhật đường dẫn này
-        try:
-            model = torch.load(model_path, map_location=device)
-        except FileNotFoundError:
-            print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
-            return
-        model.eval()
-    
-        test_img_dir = os.path.join(args.root_path, "test/test")
-    
-        df_cui = pd.read_csv(cui_names_csv)
-        name_list = list(df_cui["Name"].drop_duplicates())
-    
-        # Kiểm tra trùng lặp
-        if len(name_list) != len(set(name_list)):
-            raise ValueError(f"Tìm thấy tên trùng lặp trong name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
-    
-        # Load embeddings
-        embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
-        model.set_concept_embeddings(embeddings)
-    
-        mlb = MultiLabelBinarizer(classes=name_list)
-        mlb.fit([])
-    
-        test_ids = [f.split(".")[0] for f in os.listdir(test_img_dir) if f.endswith(".jpg")]
-        df_test = pd.DataFrame({"ID": test_ids})
-        df_test["Caption"] = [""] * len(df_test)
-        df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
-    
-        dataset = ImgCaptionConceptDataset(df_test, test_img_dir, processor, name_list, mlb, mode="test")
-        loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
-    
-        caption_preds = []
-        concept_preds = []
-    
-        with torch.no_grad():
-            for batch in tqdm(loader, desc="Dự đoán"):
-                pixel_values = batch["pixel_values"].to(device)
-                ids = batch["id"]
-    
-                # Shared vision embedding
-                vision_out = model.vision_encoder(pixel_values=pixel_values)
-                vision_embeds = vision_out.last_hidden_state[:, 0, :]
-    
-                # Caption generation
-                gen_ids = model.text_decoder.generate(
-                    encoder_hidden_states=vision_out.last_hidden_state,
-                    max_length=100
-                )
-                captions = processor.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-    
-                # Concept prediction
-                logits = torch.matmul(vision_embeds, embeddings.T)
-                probs = torch.sigmoid(logits).cpu().numpy()
-    
-                for i in range(len(ids)):
-                    id = ids[i]
-    
-                    # Caption result
-                    caption_preds.append({"ID": id, "Caption": captions[i]})
-    
-                    # Concept result
-                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.5]
-                    cuis = [df_cui[df_cui["Name"] == n]["CUI"].values[0] for n in concept_names if n in df_cui["Name"].values]
-                    concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
-    
-        os.makedirs("outputs", exist_ok=True)
-        pd.DataFrame(caption_preds).to_csv("outputs/caption_predictions.csv", index=False)
-        pd.DataFrame(concept_preds).to_csv("outputs/concept_predictions.csv", index=False)
-    
-        print("✅ Hoàn tất. Đã lưu dự đoán vào outputs/")
-
-if __name__ == "__main__":
-    main()
-
+        predict(args.root_path, args.split, args.task, args.batch_size, args.cui_path, args.model_path)
 
 if __name__ == "__main__":
     main()
