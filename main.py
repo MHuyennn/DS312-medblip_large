@@ -170,12 +170,50 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
     embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
     model.set_concept_embeddings(embeddings)
 
+    # Khởi tạo MultiLabelBinarizerdef predict(root_path, split="test", task="both", batch_size=4, cui_path=None, model_path="./model_best.pth"):
+    """Predict caption and/or concept detection."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Đường dẫn dữ liệu
+    img_dir = os.path.join(root_path, split, split)
+    cui_path = cui_path if cui_path else root_path
+    cui_names_csv = os.path.join(cui_path, "cui_names.csv")
+
+    # Tải processor và dữ liệu CUI
+    processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+    df_cui = pd.read_csv(cui_names_csv)
+    name_list = list(df_cui["Name"].drop_duplicates())
+    print(f"Number of unique names in df_cui: {len(name_list)}")
+
+    # Kiểm tra trùng lặp
+    if len(name_list) != len(set(name_list)):
+        raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
+
+    # Kiểm tra khớp giữa name_list và df_cui
+    missing_names = [n for n in name_list if n not in df_cui["Name"].values]
+    print(f"Missing names in df_cui: {missing_names}")
+
+    # Tải mô hình
+    try:
+        model = torch.load(model_path, map_location=device)
+    except FileNotFoundError:
+        print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
+        return
+    model.eval()
+    model.to(device)
+
+    # Tải embeddings
+    embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
+    model.set_concept_embeddings(embeddings)
+    print(f"Concept embeddings shape: {embeddings.shape}")
+
     # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit([])
 
     # Tạo dataset
     test_ids = [f.split(".")[0] for f in os.listdir(img_dir) if f.endswith(".jpg")]
+    print(f"Number of test images: {len(test_ids)}")
     df_test = pd.DataFrame({"ID": test_ids})
     df_test["Caption"] = [""] * len(df_test)
     df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
@@ -191,12 +229,13 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
         for batch in tqdm(loader, desc="Dự đoán"):
             pixel_values = batch["pixel_values"].to(device)
             ids = batch["id"]
+            print(f"Batch pixel_values shape: {pixel_values.shape}, IDs: {ids}")
 
             # Shared vision embedding
             vision_out = model.vision_encoder(pixel_values=pixel_values)
-            vision_embeds = vision_out.last_hidden_state[:, 0, :]
+            vision_embeds = visionresident_0 = vision_out.last_hidden_state[:, 0, :]
 
-            # Caption prediction (nếu task là caption hoặc both)
+            # Caption prediction
             if task in ["caption", "both"]:
                 gen_ids = model.text_decoder.generate(
                     encoder_hidden_states=vision_out.last_hidden_state,
@@ -204,22 +243,23 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
                 )
                 captions = processor.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
 
-            # Concept prediction (nếu task là concept hoặc both)
+            # Concept prediction
             if task in ["concept", "both"]:
                 logits = torch.matmul(vision_embeds, embeddings.T)
                 probs = torch.sigmoid(logits).cpu().numpy()
+                print(f"Probs max: {probs.max()}, min: {probs.min()}, mean: {probs.mean()}")
 
             for i in range(len(ids)):
                 id = ids[i]
 
-                # Caption result
                 if task in ["caption", "both"]:
                     caption_preds.append({"ID": id, "Caption": captions[i]})
 
-                # Concept result
                 if task in ["concept", "both"]:
-                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.5]
+                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.3]  # Giảm ngưỡng để debug
+                    print(f"Concept names for ID {id}: {concept_names}")
                     cuis = [df_cui[df_cui["Name"] == n]["CUI"].values[0] for n in concept_names if n in df_cui["Name"].values]
+                    print(f"CUIs for ID {id}: {cuis}")
                     concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
 
     # Lưu kết quả
