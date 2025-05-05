@@ -14,14 +14,14 @@ from evaluate import evaluate_caption, evaluate_concept
 
 def load_cui_name_embeddings(df_cui, processor, device):
     """Tạo embeddings từ danh sách Name concepts."""
-    names = df_cui["Name"].tolist()
+    names = df_cui["Name"].drop_duplicates().tolist()  # Loại bỏ trùng lặp
     inputs = processor.tokenizer(names, padding=True, truncation=True, return_tensors="pt").to(device)
 
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
     
     input_embeddings = model.text_decoder.get_input_embeddings()(inputs.input_ids)
-    name_embeddings = input_embeddings.mean(dim=1)  # Trung bình các token sequence
-
+    name_embeddings = input_embeddings.mean(dim=1)
+    print(f"Number of names: {len(names)}, Embeddings shape: {name_embeddings.shape}")
     return name_embeddings, names
 
 def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_best.pth"):
@@ -152,37 +152,6 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     df_cui = pd.read_csv(cui_names_csv)
     name_list = list(df_cui["Name"].drop_duplicates())
-
-    # Kiểm tra trùng lặp
-    if len(name_list) != len(set(name_list)):
-        raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
-
-    # Tải mô hình
-    try:
-        model = torch.load(model_path, map_location=device)
-    except FileNotFoundError:
-        print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
-        return
-    model.eval()
-    model.to(device)
-
-    # Tải embeddings
-    embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
-    model.set_concept_embeddings(embeddings)
-
-    # Khởi tạo MultiLabelBinarizerdef predict(root_path, split="test", task="both", batch_size=4, cui_path=None, model_path="./model_best.pth"):
-    """Predict caption and/or concept detection."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Đường dẫn dữ liệu
-    img_dir = os.path.join(root_path, split, split)
-    cui_path = cui_path if cui_path else root_path
-    cui_names_csv = os.path.join(cui_path, "cui_names.csv")
-
-    # Tải processor và dữ liệu CUI
-    processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    df_cui = pd.read_csv(cui_names_csv)
-    name_list = list(df_cui["Name"].drop_duplicates())
     print(f"Number of unique names in df_cui: {len(name_list)}")
 
     # Kiểm tra trùng lặp
@@ -233,7 +202,7 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
 
             # Shared vision embedding
             vision_out = model.vision_encoder(pixel_values=pixel_values)
-            vision_embeds = visionresident_0 = vision_out.last_hidden_state[:, 0, :]
+            vision_embeds = vision_out.last_hidden_state[:, 0, :]
 
             # Caption prediction
             if task in ["caption", "both"]:
@@ -249,6 +218,13 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
                 probs = torch.sigmoid(logits).cpu().numpy()
                 print(f"Probs max: {probs.max()}, min: {probs.min()}, mean: {probs.mean()}")
 
+                # In top 5 khái niệm có xác suất cao nhất
+                top_k = 5
+                for i in range(len(ids)):
+                    top_probs, top_indices = torch.topk(torch.tensor(probs[i]), k=top_k)
+                    top_names = [name_list[idx] for idx in top_indices]
+                    print(f"Top {top_k} concepts for ID {ids[i]}: {list(zip(top_names, top_probs.tolist()))}")
+
             for i in range(len(ids)):
                 id = ids[i]
 
@@ -256,7 +232,7 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
                     caption_preds.append({"ID": id, "Caption": captions[i]})
 
                 if task in ["concept", "both"]:
-                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.3]  # Giảm ngưỡng để debug
+                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.2]
                     print(f"Concept names for ID {id}: {concept_names}")
                     cuis = [df_cui[df_cui["Name"] == n]["CUI"].values[0] for n in concept_names if n in df_cui["Name"].values]
                     print(f"CUIs for ID {id}: {cuis}")
