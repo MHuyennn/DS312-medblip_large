@@ -8,6 +8,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score
 import numpy as np
+from transformers import AutoProcessor, BlipForConditionalGeneration
 
 from dataset import ImgCaptionConceptDataset
 from model import MedBLIPMultitask
