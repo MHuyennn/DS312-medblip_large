@@ -3,6 +3,8 @@ import pandas as pd
 import torch
 import cv2
 from torch.utils.data import Dataset
+from PIL import Image
+from torchvision import transforms
 
 class ImgCaptionConceptDataset(Dataset):
     """Dataset dùng cho đồng thời caption prediction và concept detection."""
@@ -28,6 +30,23 @@ class ImgCaptionConceptDataset(Dataset):
         self.max_length = max_length
         self.mode = mode
 
+        # Định nghĩa transform cho data augmentation
+        if self.mode == "train":
+            self.transform = transforms.Compose([
+                transforms.RandomRotation(10),  # Xoay ngẫu nhiên ±10 độ
+                transforms.RandomHorizontalFlip(p=0.5),  # Lật ngang với xác suất 50%
+                transforms.ColorJitter(brightness=0.2, contrast=0.2),  # Thay đổi độ sáng, độ tương phản
+                transforms.Resize(self.image_size),  # Resize ảnh
+                transforms.ToTensor(),  # Chuyển thành tensor
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Chuẩn hóa
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize(self.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+
     def __len__(self):
         return len(self.df)
 
@@ -39,7 +58,10 @@ class ImgCaptionConceptDataset(Dataset):
         if image is None:
             raise ValueError(f"Ảnh {img_path} không tồn tại hoặc lỗi khi đọc.")
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = cv2.resize(image, self.image_size)
+        image = Image.fromarray(image)  # Chuyển sang PIL Image để dùng torchvision transforms
+
+        # Áp dụng transform
+        image = self.transform(image)
 
         pixel_values = self.processor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
 
