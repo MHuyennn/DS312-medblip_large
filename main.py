@@ -43,6 +43,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     df_cui = pd.read_csv(cui_names_csv)
 
     cui2name = dict(zip(df_cui["CUI"], df_cui["Name"]))
+    name2cui = {v: k for k, v in cui2name.items()}
     df_train = pd.merge(df_cap_train, df_con_train, on="ID")
     df_valid = pd.merge(df_cap_valid, df_con_valid, on="ID")
 
@@ -136,7 +137,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         # Save best model
         if avg_loss < best_loss:
             best_loss = avg_loss
-            torch.save(model, save_path)
+            torch.save(model.state_dict(), save_path)
             print(f"✅ Saved best model to {save_path}")
 
 def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, model_path="./model_best.pth"):
@@ -154,22 +155,31 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
     name_list = list(df_cui["Name"].drop_duplicates())
     print(f"Number of unique names in df_cui: {len(name_list)}")
 
+    # Tạo ánh xạ Name ↔ CUI
+    name2cui = dict(zip(df_cui["Name"], df_cui["CUI"]))
+
     # Kiểm tra trùng lặp
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
     # Kiểm tra khớp giữa name_list và df_cui
     missing_names = [n for n in name_list if n not in df_cui["Name"].values]
-    print(f"Missing names in df_cui: {missing_names}")
+    if missing_names:
+        print(f"Warning: Missing names in df_cui: {missing_names}")
 
     # Tải mô hình
     try:
-        model = torch.load(model_path, map_location=device)
+        blip_base = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+        model = MedBLIPMultitask(
+            vision_encoder=blip_base.vision_model,
+            text_decoder=blip_base.text_decoder,
+            processor=processor
+        ).to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
     except FileNotFoundError:
         print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
         return
     model.eval()
-    model.to(device)
 
     # Tải embeddings
     embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
@@ -198,44 +208,31 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
         for batch in tqdm(loader, desc="Dự đoán"):
             pixel_values = batch["pixel_values"].to(device)
             ids = batch["id"]
-            print(f"Batch pixel_values shape: {pixel_values.shape}, IDs: {ids}")
 
-            # Shared vision embedding
-            vision_out = model.vision_encoder(pixel_values=pixel_values)
-            vision_embeds = vision_out.last_hidden_state[:, 0, :]
+            # Dự đoán cả caption và concept cùng lúc nếu task="both"
+            outputs = model(pixel_values, mode="predict_both" if task == "both" else f"predict_{task}")
 
-            # Caption prediction
             if task in ["caption", "both"]:
-                gen_ids = model.text_decoder.generate(
-                    encoder_hidden_states=vision_out.last_hidden_state,
-                    max_length=100
-                )
-                captions = processor.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
+                captions = outputs["generated_captions"]
+                for i, id in enumerate(ids):
+                    caption_preds.append({"ID": id, "Caption": captions[i]})
 
-            # Concept prediction
             if task in ["concept", "both"]:
-                logits = torch.matmul(vision_embeds, embeddings.T)
+                logits = outputs["logits_concept"]
                 probs = torch.sigmoid(logits).cpu().numpy()
-                print(f"Probs max: {probs.max()}, min: {probs.min()}, mean: {probs.mean()}")
 
-                # In top 5 khái niệm có xác suất cao nhất
+                # In top 5 khái niệm để debug
                 top_k = 5
                 for i in range(len(ids)):
                     top_probs, top_indices = torch.topk(torch.tensor(probs[i]), k=top_k)
                     top_names = [name_list[idx] for idx in top_indices]
                     print(f"Top {top_k} concepts for ID {ids[i]}: {list(zip(top_names, top_probs.tolist()))}")
 
-            for i in range(len(ids)):
-                id = ids[i]
-
-                if task in ["caption", "both"]:
-                    caption_preds.append({"ID": id, "Caption": captions[i]})
-
-                if task in ["concept", "both"]:
-                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.2]
-                    print(f"Concept names for ID {id}: {concept_names}")
-                    cuis = [df_cui[df_cui["Name"] == n]["CUI"].values[0] for n in concept_names if n in df_cui["Name"].values]
-                    print(f"CUIs for ID {id}: {cuis}")
+                    # Chọn concepts với xác suất > 0.3 (ngưỡng động)
+                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.3]
+                    print(f"Concept names for ID {ids[i]}: {concept_names}")
+                    cuis = [name2cui[n] for n in concept_names if n in name2cui]
+                    print(f"CUIs for ID {ids[i]}: {cuis}")
                     concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
 
     # Lưu kết quả
