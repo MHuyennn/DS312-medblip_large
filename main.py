@@ -7,7 +7,7 @@ import torch.optim as optim
 from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score
-from transformers import AutoProcessor, BlipForConditionalGeneration
+import numpy as np
 
 from dataset import ImgCaptionConceptDataset
 from model import MedBLIPMultitask
@@ -60,7 +60,7 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=[0.2, 
     print(f"Best threshold: {best_threshold:.1f} with F1-score: {best_f1:.4f}")
     return best_threshold
 
-def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_best.pth"):
+def train(root_path, batch_size=4, num_epochs=1, lr=1e-5, save_path="./model_best.pth", checkpoint_path=None, start_epoch=1):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load data
@@ -129,15 +129,25 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     criterion_concept = nn.BCEWithLogitsLoss()
 
-    # Training loop
+    # Khởi tạo biến theo dõi
     best_f1 = 0.0
     best_threshold = 0.3
 
-    for epoch in range(num_epochs):
+    # Tải checkpoint nếu có
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        best_f1 = checkpoint["best_f1"]
+        best_threshold = checkpoint["best_threshold"]
+        print(f"✅ Loaded checkpoint from {checkpoint_path} (best_f1: {best_f1:.4f}, best_threshold: {best_threshold:.1f})")
+
+    # Training loop
+    for epoch in range(start_epoch, start_epoch + num_epochs):
         model.train()
         running_loss = 0.0
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} - Training"):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{start_epoch + num_epochs - 1} - Training"):
             optimizer.zero_grad()
 
             pixel_values = batch["pixel_values"].to(device)
@@ -170,7 +180,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
             running_loss += loss.item()
 
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {avg_loss:.4f}")
+        print(f"Epoch [{epoch}/{start_epoch + num_epochs - 1}] Loss: {avg_loss:.4f}")
 
         # Đánh giá trên tập valid
         model.eval()
@@ -210,15 +220,27 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
 
         print(f"Validation Loss: {avg_valid_loss:.4f}, F1-score (threshold {best_threshold:.1f}): {valid_f1:.4f}")
 
-        # Cập nhật ngưỡng tối ưu sau mỗi 2 epoch
-        if epoch % 2 == 0:
-            best_threshold = evaluate_threshold(model, valid_loader, name_list, device)
-        
+        # Cập nhật ngưỡng tối ưu
+        best_threshold = evaluate_threshold(model, valid_loader, name_list, device)
+
         # Save best model dựa trên F1-score
         if valid_f1 > best_f1:
             best_f1 = valid_f1
             torch.save(model.state_dict(), save_path)
             print(f"✅ Saved best model to {save_path} with F1-score: {best_f1:.4f}")
+
+        # Lưu checkpoint sau epoch 1
+        if epoch == 1:
+            checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "best_f1": best_f1,
+                "best_threshold": best_threshold,
+                "epoch": epoch
+            }
+            checkpoint_path_epoch1 = "/kaggle/working/checkpoint_epoch1.pth"
+            torch.save(checkpoint, checkpoint_path_epoch1)
+            print(f"✅ Saved checkpoint after epoch 1 to {checkpoint_path_epoch1}")
 
     print(f"Final best threshold: {best_threshold:.1f}")
     return best_threshold
@@ -333,20 +355,38 @@ def main():
     parser.add_argument("--root_path", type=str, required=True)
     parser.add_argument("--cui_path", type=str, default=None, help="Path to folder containing cui_names.csv")
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_epochs", type=int, default=5)
+    parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--task", type=str, choices=["caption", "concept", "both"], default="both")
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     parser.add_argument("--model_path", type=str, default="./model_best.pth", help="Path to the trained model")
     parser.add_argument("--threshold", type=float, default=0.3, help="Threshold for concept prediction")
+    parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to checkpoint for resuming training")
+    parser.add_argument("--start_epoch", type=int, default=1, choices=[1, 2], help="Starting epoch (1 or 2)")
     args = parser.parse_args()
 
     if args.mode == "train":
-        best_threshold = train(args.root_path, args.batch_size, args.num_epochs, args.lr, args.model_path)
+        best_threshold = train(
+            args.root_path,
+            args.batch_size,
+            args.num_epochs,
+            args.lr,
+            args.model_path,
+            args.checkpoint_path,
+            args.start_epoch
+        )
         print(f"Using best threshold {best_threshold:.1f} for prediction")
         args.threshold = best_threshold
     elif args.mode == "predict":
-        predict(args.root_path, args.split, args.task, args.batch_size, args.cui_path, args.model_path, args.threshold)
+        predict(
+            args.root_path,
+            args.split,
+            args.task,
+            args.batch_size,
+            args.cui_path,
+            args.model_path,
+            args.threshold
+        )
 
 if __name__ == "__main__":
     main()
