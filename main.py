@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.metrics import f1_score
 from transformers import AutoProcessor, BlipForConditionalGeneration
 
 from dataset import ImgCaptionConceptDataset
@@ -23,6 +24,41 @@ def load_cui_name_embeddings(df_cui, processor, device):
     name_embeddings = input_embeddings.mean(dim=1)
     print(f"Number of names: {len(names)}, Embeddings shape: {name_embeddings.shape}")
     return name_embeddings, names
+
+def evaluate_threshold(model, valid_loader, name_list, device, thresholds=[0.2, 0.3, 0.4, 0.5]):
+    """Tìm ngưỡng tối ưu cho concept prediction dựa trên F1-score trên tập valid."""
+    model.eval()
+    all_true_labels = []
+    all_probs = []
+
+    with torch.no_grad():
+        for batch in valid_loader:
+            pixel_values = batch["pixel_values"].to(device)
+            labels_concept = batch["labels_concept"].to(device)
+
+            outputs = model(pixel_values, mode="predict_concept")
+            logits = outputs["logits_concept"]
+            probs = torch.sigmoid(logits).cpu().numpy()
+
+            all_true_labels.append(labels_concept.cpu().numpy())
+            all_probs.append(probs)
+
+    all_true_labels = np.concatenate(all_true_labels, axis=0)
+    all_probs = np.concatenate(all_probs, axis=0)
+
+    best_threshold = 0.3
+    best_f1 = 0.0
+
+    for threshold in thresholds:
+        pred_labels = (all_probs > threshold).astype(int)
+        f1 = f1_score(all_true_labels, pred_labels, average="micro")
+        print(f"Threshold {threshold:.1f}: F1-score = {f1:.4f}")
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = threshold
+
+    print(f"Best threshold: {best_threshold:.1f} with F1-score: {best_f1:.4f}")
+    return best_threshold
 
 def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_best.pth"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -94,7 +130,9 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     criterion_concept = nn.BCEWithLogitsLoss()
 
     # Training loop
-    best_loss = float('inf')
+    best_f1 = 0.0
+    best_threshold = 0.3
+
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
@@ -134,13 +172,58 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         avg_loss = running_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}] Loss: {avg_loss:.4f}")
 
-        # Save best model
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save(model.state_dict(), save_path)
-            print(f"✅ Saved best model to {save_path}")
+        # Đánh giá trên tập valid
+        model.eval()
+        valid_loss = 0.0
+        all_true_labels = []
+        all_probs = []
 
-def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, model_path="./model_best.pth"):
+        with torch.no_grad():
+            for batch in valid_loader:
+                pixel_values = batch["pixel_values"].to(device)
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                labels_caption = batch["labels_caption"].to(device)
+                labels_concept = batch["labels_concept"].to(device)
+
+                outputs = model(
+                    pixel_values,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels_caption=labels_caption,
+                    mode="train"
+                )
+                loss_caption = outputs["loss_caption"]
+                logits_concept = outputs["logits_concept"]
+
+                loss = loss_caption + criterion_concept(logits_concept, labels_concept)
+                valid_loss += loss.item()
+
+                probs = torch.sigmoid(logits_concept).cpu().numpy()
+                all_true_labels.append(labels_concept.cpu().numpy())
+                all_probs.append(probs)
+
+        avg_valid_loss = valid_loss / len(valid_loader)
+        all_true_labels = np.concatenate(all_true_labels, axis=0)
+        all_probs = np.concatenate(all_probs, axis=0)
+        valid_f1 = f1_score(all_true_labels, (all_probs > best_threshold).astype(int), average="micro")
+
+        print(f"Validation Loss: {avg_valid_loss:.4f}, F1-score (threshold {best_threshold:.1f}): {valid_f1:.4f}")
+
+        # Cập nhật ngưỡng tối ưu sau mỗi 2 epoch
+        if epoch % 2 == 0:
+            best_threshold = evaluate_threshold(model, valid_loader, name_list, device)
+        
+        # Save best model dựa trên F1-score
+        if valid_f1 > best_f1:
+            best_f1 = valid_f1
+            torch.save(model.state_dict(), save_path)
+            print(f"✅ Saved best model to {save_path} with F1-score: {best_f1:.4f}")
+
+    print(f"Final best threshold: {best_threshold:.1f}")
+    return best_threshold
+
+def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, model_path="./model_best.pth", threshold=0.3):
     """Predict caption and/or concept detection."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -228,8 +311,8 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
                     top_names = [name_list[idx] for idx in top_indices]
                     print(f"Top {top_k} concepts for ID {ids[i]}: {list(zip(top_names, top_probs.tolist()))}")
 
-                    # Chọn concepts với xác suất > 0.3 (ngưỡng động)
-                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > 0.3]
+                    # Chọn concepts với xác suất > threshold
+                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > threshold]
                     print(f"Concept names for ID {ids[i]}: {concept_names}")
                     cuis = [name2cui[n] for n in concept_names if n in name2cui]
                     print(f"CUIs for ID {ids[i]}: {cuis}")
@@ -255,12 +338,15 @@ def main():
     parser.add_argument("--task", type=str, choices=["caption", "concept", "both"], default="both")
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     parser.add_argument("--model_path", type=str, default="./model_best.pth", help="Path to the trained model")
+    parser.add_argument("--threshold", type=float, default=0.3, help="Threshold for concept prediction")
     args = parser.parse_args()
 
     if args.mode == "train":
-        train(args.root_path, args.batch_size, args.num_epochs, args.lr, args.model_path)
+        best_threshold = train(args.root_path, args.batch_size, args.num_epochs, args.lr, args.model_path)
+        print(f"Using best threshold {best_threshold:.1f} for prediction")
+        args.threshold = best_threshold
     elif args.mode == "predict":
-        predict(args.root_path, args.split, args.task, args.batch_size, args.cui_path, args.model_path)
+        predict(args.root_path, args.split, args.task, args.batch_size, args.cui_path, args.model_path, args.threshold)
 
 if __name__ == "__main__":
     main()
