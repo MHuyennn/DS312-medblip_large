@@ -37,14 +37,12 @@ class ImgCaptionConceptDataset(Dataset):
                 transforms.RandomHorizontalFlip(p=0.5),  # Lật ngang với xác suất 50%
                 transforms.ColorJitter(brightness=0.2, contrast=0.2),  # Thay đổi độ sáng, độ tương phản
                 transforms.Resize(self.image_size),  # Resize ảnh
-                transforms.ToTensor(),  # Chuyển thành tensor
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Chuẩn hóa
+                transforms.ToTensor(),  # Chuyển thành tensor [0, 1]
             ])
         else:
             self.transform = transforms.Compose([
                 transforms.Resize(self.image_size),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                transforms.ToTensor(),  # Chuyển thành tensor [0, 1]
             ])
 
     def __len__(self):
@@ -62,6 +60,10 @@ class ImgCaptionConceptDataset(Dataset):
 
         # Áp dụng transform
         image = self.transform(image)
+
+        # Kiểm tra giá trị pixel
+        if image.min() < 0 or image.max() > 1:
+            raise ValueError(f"Pixel values out of range [0, 1] for image {img_path}: min={image.min()}, max={image.max()}")
 
         pixel_values = self.processor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
 
