@@ -9,18 +9,7 @@ from torchvision import transforms
 class ImgCaptionConceptDataset(Dataset):
     """Dataset dùng cho đồng thời caption prediction và concept detection."""
 
-    def __init__(self, dataframe, img_dir, processor, name_list, mlb, image_size=(224, 224), max_length=100, mode="train"):
-        """
-        Args:
-            dataframe (pd.DataFrame): Dataframe đã merge từ caption.csv và concept.csv.
-            img_dir (str): Đường dẫn chứa ảnh.
-            processor: BLIP processor.
-            name_list (list): Danh sách các concept Name đã map từ cui_names.csv.
-            mlb: MultiLabelBinarizer fitted trên Name.
-            image_size (tuple): Kích thước resize ảnh.
-            max_length (int): Độ dài tối đa của caption tokenized.
-            mode (str): 'train', 'valid', 'test'.
-        """
+    def __init__(self, dataframe, img_dir, processor, name_list, mlb, image_size=(224, 224), max_length=100, mode="train", transform=None):
         self.df = dataframe
         self.img_dir = img_dir
         self.processor = processor
@@ -30,20 +19,24 @@ class ImgCaptionConceptDataset(Dataset):
         self.max_length = max_length
         self.mode = mode
 
-        # Định nghĩa transform cho data augmentation
-        if self.mode == "train":
-            self.transform = transforms.Compose([
-                transforms.RandomRotation(10),  # Xoay ngẫu nhiên ±10 độ
-                transforms.RandomHorizontalFlip(p=0.5),  # Lật ngang với xác suất 50%
-                transforms.ColorJitter(brightness=0.2, contrast=0.2),  # Thay đổi độ sáng, độ tương phản
-                transforms.Resize(self.image_size),  # Resize ảnh
-                transforms.ToTensor(),  # Chuyển thành tensor [0, 1]
-            ])
+        # Nếu transform được cung cấp, sử dụng nó
+        if transform is not None:
+            self.transform = transform
         else:
-            self.transform = transforms.Compose([
-                transforms.Resize(self.image_size),
-                transforms.ToTensor(),  # Chuyển thành tensor [0, 1]
-            ])
+            # Định nghĩa transform mặc định
+            if self.mode == "train":
+                self.transform = transforms.Compose([
+                    transforms.RandomRotation(10),  # Xoay ngẫu nhiên ±10 độ
+                    transforms.RandomHorizontalFlip(p=0.5),  # Lật ngang với xác suất 50%
+                    transforms.ColorJitter(brightness=0.2, contrast=0.2),  # Thay đổi độ sáng, độ tương phản
+                    transforms.Resize(self.image_size),  # Resize ảnh
+                    transforms.ToTensor(),  # Chuyển thành tensor [0, 1]
+                ])
+            else:
+                self.transform = transforms.Compose([
+                    transforms.Resize(self.image_size),
+                    transforms.ToTensor(),  # Chuyển thành tensor [0, 1]
+                ])
 
     def __len__(self):
         return len(self.df)
@@ -65,6 +58,7 @@ class ImgCaptionConceptDataset(Dataset):
         if image.min() < 0 or image.max() > 1:
             raise ValueError(f"Pixel values out of range [0, 1] for image {img_path}: min={image.min()}, max={image.max()}")
 
+        # Sử dụng processor của BLIP để xử lý ảnh nếu cần
         pixel_values = self.processor(images=image, return_tensors="pt")["pixel_values"].squeeze(0)
 
         encoding = {
