@@ -16,16 +16,31 @@ from dataset import ImgCaptionConceptDataset
 from model import MedBLIPMultitask, FocalLoss
 from evaluate import evaluate_caption, evaluate_concept
 
-def load_cui_name_embeddings(df_cui, processor, device):
-    """Tạo embeddings từ danh sách Name concepts."""
+def load_cui_name_embeddings(df_cui, processor, device, expected_num_concepts=2468):
+    """Tạo embeddings từ danh sách Name concepts, đảm bảo đúng số lượng concepts."""
     names = df_cui["Name"].drop_duplicates().tolist()
+    print(f"Initial number of unique names: {len(names)}")
+
+    # Nếu số concept ít hơn expected_num_concepts, thêm dummy concepts
+    if len(names) < expected_num_concepts:
+        print(f"Adding {expected_num_concepts - len(names)} dummy concepts to match checkpoint")
+        dummy_names = [f"dummy_concept_{i}" for i in range(expected_num_concepts - len(names))]
+        names.extend(dummy_names)
+    elif len(names) > expected_num_concepts:
+        print(f"Warning: Truncating to {expected_num_concepts} names to match checkpoint")
+        names = names[:expected_num_concepts]
+
     inputs = processor.tokenizer(names, padding=True, truncation=True, return_tensors="pt").to(device)
 
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
     
     input_embeddings = model.text_decoder.get_input_embeddings()(inputs.input_ids)
     name_embeddings = input_embeddings.mean(dim=1)
-    print(f"Number of names: {len(names)}, Embeddings shape: {name_embeddings.shape}")
+    print(f"Final number of names: {len(names)}, Embeddings shape: {name_embeddings.shape}")
+    
+    if name_embeddings.shape[0] != expected_num_concepts:
+        raise ValueError(f"Expected {expected_num_concepts} concepts, but got {name_embeddings.shape[0]}")
+    
     return name_embeddings, names
 
 def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.arange(0.1, 0.6, 0.1)):
@@ -110,10 +125,11 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
-    name_embeddings, _ = load_cui_name_embeddings(df_cui_train, processor, device)
+    # Tải embeddings với số concept khớp checkpoint
+    name_embeddings, name_list = load_cui_name_embeddings(df_cui_train, processor, device, expected_num_concepts=2468)
 
     # Kiểm tra số lượng concept names
-    print(f"Expected concept embeddings shape: {name_embeddings.shape}")
+    print(f"Final concept embeddings shape: {name_embeddings.shape}")
 
     # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
