@@ -176,11 +176,13 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)  # Bỏ qua tham số không khớp
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        best_f1 = checkpoint["best_f1"]
-        best_threshold = checkpoint["best_threshold"]
+        best_f1 = checkpoint.get("best_f1", 0.0)  # Lấy best_f1, mặc định 0.0 nếu không có
+        best_threshold = checkpoint.get("best_threshold", 0.3)  # Lấy best_threshold, mặc định 0.3 nếu không có
         print(f"✅ Loaded checkpoint from {checkpoint_path} (best_f1: {best_f1:.4f}, best_threshold: {best_threshold:.1f})")
         print("Note: Some parameters (e.g., ConceptHead, MultiheadAttention) were not loaded and will be randomly initialized.")
+        print("Note: Optimizer state was not loaded due to parameter mismatch. Using new optimizer.")
+    else:
+        print("No checkpoint found. Starting training with new optimizer.")
 
     # Training loop
     for epoch in range(start_epoch, start_epoch + num_epochs):
