@@ -112,6 +112,9 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
 
     name_embeddings, _ = load_cui_name_embeddings(df_cui_train, processor, device)
 
+    # Kiểm tra số lượng concept names
+    print(f"Expected concept embeddings shape: {name_embeddings.shape}")
+
     # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
@@ -122,7 +125,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(15),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.ToTensor()  # Không cần Normalize vì BLIP processor sẽ xử lý
+        transforms.ToTensor()
     ])
 
     # Datasets
@@ -156,11 +159,12 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     # Tải checkpoint nếu có
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)  # Bỏ qua tham số không khớp
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         best_f1 = checkpoint["best_f1"]
         best_threshold = checkpoint["best_threshold"]
         print(f"✅ Loaded checkpoint from {checkpoint_path} (best_f1: {best_f1:.4f}, best_threshold: {best_threshold:.1f})")
+        print("Note: Some parameters (e.g., ConceptHead, MultiheadAttention) were not loaded and will be randomly initialized.")
 
     # Training loop
     for epoch in range(start_epoch, start_epoch + num_epochs):
