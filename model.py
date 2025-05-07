@@ -68,7 +68,7 @@ class MedBLIPMultitask(nn.Module):
         # Fine-tune một phần vision encoder (chỉ các tầng cuối)
         for param in self.vision_encoder.parameters():
             param.requires_grad = False
-        for param in self.vision_encoder.encoder.layer[-4:].parameters():
+        for param in self.vision_encoder.encoder.layers[-4:].parameters():  # Sửa từ layer thành layers
             param.requires_grad = True  # Fine-tune 4 tầng cuối
 
     def set_concept_embeddings(self, embeddings):
@@ -77,17 +77,11 @@ class MedBLIPMultitask(nn.Module):
 
     def clean_caption(self, caption):
         """Xử lý hậu kỳ để làm sạch caption."""
-        # Loại bỏ cụm từ vô nghĩa
         caption = caption.replace('clopsclops', '').replace('temperatures', '').replace('bravoliac', '')
-        # Loại bỏ lặp từ
         caption = re.sub(r'\b(\w+\s+\w+\s+)\1+', r'\1', caption)
-        # Chuẩn hóa dấu câu
         caption = re.sub(r'\s*-\s*', ' - ', caption)
-        # Loại bỏ ký tự đặc biệt dư thừa
         caption = re.sub(r'[^\w\s.,-]', '', caption)
-        # Loại bỏ khoảng trắng thừa và đảm bảo câu hoàn chỉnh
         caption = ' '.join(caption.split())
-        # Thêm dấu chấm nếu caption không kết thúc bằng dấu câu
         if caption and caption[-1] not in '.?!':
             caption += '.'
         return caption.strip()
@@ -132,11 +126,11 @@ class MedBLIPMultitask(nn.Module):
             # Dự đoán caption
             generated_ids = self.text_decoder.generate(
                 encoder_hidden_states=vision_embeds,
-                max_length=200,  # Tăng để caption chi tiết hơn
-                num_beams=6,  # Tăng chất lượng beam search
+                max_length=200,
+                num_beams=6,
                 no_repeat_ngram_size=3,
-                repetition_penalty=1.8,  # Phạt lặp từ mạnh hơn
-                length_penalty=1.2  # Ưu tiên caption dài hơn
+                repetition_penalty=1.8,
+                length_penalty=1.2
             )
             captions = self.processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
             captions = [self.clean_caption(caption) for caption in captions]
