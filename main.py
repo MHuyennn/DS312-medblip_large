@@ -8,43 +8,16 @@ from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score
 import numpy as np
-from transformers import AutoProcessor, BlipForConditionalGeneration
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
 from libauc.losses import AUCM_MultiLabel
 from libauc.optimizers import PESG
 
-# Tắt parallelism cho tokenizer để tránh cảnh báo
+# Tắt parallelism để tránh cảnh báo
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from dataset import ImgCaptionConceptDataset
-from model import MedBLIPMultitask
-
-def load_cui_name_embeddings(df_cui, processor, device, expected_num_concepts=2468):
-    """Tạo embeddings từ danh sách Name concepts, đảm bảo đúng số lượng concepts."""
-    names = df_cui["Name"].drop_duplicates().tolist()
-    print(f"Initial number of unique names: {len(names)}")
-
-    if len(names) < expected_num_concepts:
-        print(f"Adding {expected_num_concepts - len(names)} dummy concepts to match checkpoint")
-        dummy_names = [f"dummy_concept_{i}" for i in range(expected_num_concepts - len(names))]
-        names.extend(dummy_names)
-    elif len(names) > expected_num_concepts:
-        print(f"Warning: Truncating to {expected_num_concepts} names to match checkpoint")
-        names = names[:expected_num_concepts]
-
-    inputs = processor.tokenizer(names, padding=True, truncation=True, return_tensors="pt").to(device)
-
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base").to(device)
-    
-    input_embeddings = model.text_decoder.get_input_embeddings()(inputs.input_ids)
-    name_embeddings = input_embeddings.mean(dim=1)
-    print(f"Final number of names: {len(names)}, Embeddings shape: {name_embeddings.shape}")
-    
-    if name_embeddings.shape[0] != expected_num_concepts:
-        raise ValueError(f"Expected {expected_num_concepts} concepts, but got {name_embeddings.shape[0]}")
-    
-    return name_embeddings, names
+from model import MedCSRAModel
 
 def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.arange(0.1, 0.6, 0.1)):
     """Tìm ngưỡng tối ưu cho concept prediction dựa trên F1-score trên tập valid."""
@@ -57,7 +30,7 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
             pixel_values = batch["pixel_values"].to(device)
             labels_concept = batch["labels_concept"].to(device)
 
-            outputs = model(pixel_values, mode="predict_concept")
+            outputs = model(pixel_values)
             logits = outputs["logits_concept"]
             probs = torch.sigmoid(logits).cpu().numpy()
 
@@ -81,8 +54,10 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     print(f"Best threshold: {best_threshold:.1f} with F1-score: {best_f1:.4f}")
     return best_threshold
 
-def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best.pth", checkpoint_path=None, start_epoch=2):
+def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best.pth"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_gpus = torch.cuda.device_count()
+    print(f"Using {num_gpus} GPUs")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
@@ -110,9 +85,6 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
         lambda x: [cui2name[cui] for cui in str(x).split(";") if cui in cui2name]
     )
 
-    processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    processor.image_processor.do_rescale = False  # Tắt rescaling để tránh cảnh báo
-
     # Lấy danh sách concept names từ tập train
     concept_names_in_train = set()
     for concept_list in df_train["Concept_Names"]:
@@ -124,12 +96,6 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
 
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
-
-    # Tải embeddings với số concept khớp checkpoint
-    name_embeddings, name_list = load_cui_name_embeddings(df_cui_train, processor, device, expected_num_concepts=2468)
-
-    # Kiểm tra số lượng concept names
-    print(f"Final concept embeddings shape: {name_embeddings.shape}")
 
     # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
@@ -144,7 +110,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
         imratio_list.append(imratio)
     print(f"imratio_list length: {len(imratio_list)}, min: {min(imratio_list):.4f}, max: {max(imratio_list):.4f}")
 
-    # Data augmentation mạnh hơn
+    # Data augmentation
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
         transforms.RandomHorizontalFlip(),
@@ -155,23 +121,20 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
 
     # Datasets
     train_dataset = ImgCaptionConceptDataset(
-        df_train, train_img_dir, processor, name_list, mlb, mode="train", transform=train_transform
+        df_train, train_img_dir, None, name_list, mlb, mode="train", transform=train_transform
     )
     valid_dataset = ImgCaptionConceptDataset(
-        df_valid, valid_img_dir, processor, name_list, mlb, mode="valid"
+        df_valid, valid_img_dir, None, name_list, mlb, mode="valid"
     )
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Model
-    blip_base = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = MedBLIPMultitask(
-        vision_encoder=blip_base.vision_model,
-        text_decoder=blip_base.text_decoder,
-        processor=processor
-    ).to(device)
-    model.set_concept_embeddings(name_embeddings)
+    model = MedCSRAModel(num_classes=2468, num_heads=1, lam=0.1).to(device)
+    if num_gpus > 1:
+        model = nn.DataParallel(model)
+        print("Model wrapped in DataParallel for multi-GPU training")
 
     # LibAUC loss và optimizer
     criterion_concept = AUCM_MultiLabel(imratio=imratio_list, device=device)
@@ -182,31 +145,20 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
     best_f1 = 0.0
     best_threshold = 0.3
 
-    # Tải checkpoint nếu có
-    if checkpoint_path and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        best_f1 = checkpoint.get("best_f1", 0.0)
-        best_threshold = checkpoint.get("best_threshold", 0.3)
-        print(f"✅ Loaded checkpoint from {checkpoint_path} (best_f1: {best_f1:.4f}, best_threshold: {best_threshold:.1f})")
-        print("Note: Some parameters (e.g., ConceptHead) were not loaded and will be randomly initialized.")
-    else:
-        print("No checkpoint found. Starting training with new optimizer.")
-
     # Training loop
-    for epoch in range(start_epoch, start_epoch + num_epochs):
+    for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
 
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch}/{start_epoch + num_epochs - 1} - Training"):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs} - Training"):
             optimizer.zero_grad()
 
             pixel_values = batch["pixel_values"].to(device)
             labels_concept = batch["labels_concept"].to(device)
 
-            outputs = model(pixel_values, mode="predict_concept")
-            logits_concept = outputs["logits_concept"]
-            preds = torch.sigmoid(logits_concept)
+            outputs = model(pixel_values)
+            logits = outputs["logits_concept"]
+            preds = torch.sigmoid(logits)
 
             loss = criterion_concept(preds, labels_concept)
             loss.backward()
@@ -219,7 +171,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
 
         scheduler.step()
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch [{epoch}/{start_epoch + num_epochs - 1}] Loss: {avg_loss:.4f}")
+        print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {avg_loss:.4f}")
 
         # Đánh giá trên tập valid
         model.eval()
@@ -232,9 +184,9 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
                 pixel_values = batch["pixel_values"].to(device)
                 labels_concept = batch["labels_concept"].to(device)
 
-                outputs = model(pixel_values, mode="predict_concept")
-                logits_concept = outputs["logits_concept"]
-                preds = torch.sigmoid(logits_concept)
+                outputs = model(pixel_values)
+                logits = outputs["logits_concept"]
+                preds = torch.sigmoid(logits)
 
                 loss = criterion_concept(preds, labels_concept)
                 valid_loss += loss.item()
@@ -256,8 +208,9 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
         # Save best model dựa trên F1-score
         if valid_f1 > best_f1:
             best_f1 = valid_f1
+            state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
             torch.save({
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_f1": best_f1,
                 "best_threshold": best_threshold,
@@ -266,31 +219,32 @@ def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best
             print(f"✅ Saved best model to {save_path} with F1-score: {best_f1:.4f}")
 
         # Lưu checkpoint mỗi epoch
+        state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
         checkpoint = {
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
             "best_f1": best_f1,
             "best_threshold": best_threshold,
             "epoch": epoch
         }
-        checkpoint_path_epoch = f"/kaggle/working/checkpoint_epoch{epoch}.pth"
+        checkpoint_path_epoch = f"/kaggle/working/checkpoint_epoch{epoch + 1}.pth"
         torch.save(checkpoint, checkpoint_path_epoch)
         print(f"✅ Saved checkpoint to {checkpoint_path_epoch}")
 
     print(f"Final best threshold: {best_threshold:.1f}")
     return best_threshold
 
-def predict(root_path, split="test", batch_size=4, cui_path=None, model_path="./model_best.pth", threshold=0.3):
+def predict(root_path, split="test", batch_size=8, cui_path=None, model_path="./model_best.pth", threshold=0.3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_gpus = torch.cuda.device_count()
+    print(f"Using {num_gpus} GPUs for prediction")
 
     # Đường dẫn dữ liệu
     img_dir = os.path.join(root_path, split, split)
     cui_path = cui_path if cui_path else root_path
     cui_names_csv = os.path.join(cui_path, "cui_names.csv")
 
-    # Tải processor và dữ liệu CUI
-    processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    processor.image_processor.do_rescale = False
+    # Tải dữ liệu CUI
     df_cui = pd.read_csv(cui_names_csv)
     df_cui = df_cui[df_cui["Name"] != "Name nicht gefunden"].drop_duplicates(subset=["Name"]).reset_index(drop=True)
     name_list = list(df_cui["Name"])
@@ -302,22 +256,15 @@ def predict(root_path, split="test", batch_size=4, cui_path=None, model_path="./
 
     # Tải mô hình
     try:
-        blip_base = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-        model = MedBLIPMultitask(
-            vision_encoder=blip_base.vision_model,
-            text_decoder=blip_base.text_decoder,
-            processor=processor
-        ).to(device)
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        model = MedCSRAModel(num_classes=2468, num_heads=1, lam=0.1).to(device)
+        checkpoint = torch.load(model_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if num_gpus > 1:
+            model = nn.DataParallel(model)
     except FileNotFoundError:
         print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
         return
     model.eval()
-
-    # Tải embeddings
-    embeddings, _ = load_cui_name_embeddings(df_cui, processor, device)
-    model.set_concept_embeddings(embeddings)
-    print(f"Concept embeddings shape: {embeddings.shape}")
 
     # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
@@ -329,7 +276,7 @@ def predict(root_path, split="test", batch_size=4, cui_path=None, model_path="./
     df_test = pd.DataFrame({"ID": test_ids})
     df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
 
-    dataset = ImgCaptionConceptDataset(df_test, img_dir, processor, name_list, mlb, mode="test")
+    dataset = ImgCaptionConceptDataset(df_test, img_dir, None, name_list, mlb, mode="test")
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Dự đoán
@@ -340,7 +287,7 @@ def predict(root_path, split="test", batch_size=4, cui_path=None, model_path="./
             pixel_values = batch["pixel_values"].to(device)
             ids = batch["id"]
 
-            outputs = model(pixel_values, mode="predict_concept")
+            outputs = model(pixel_values)
             logits = outputs["logits_concept"]
             probs = torch.sigmoid(logits).cpu().numpy()
 
@@ -354,7 +301,7 @@ def predict(root_path, split="test", batch_size=4, cui_path=None, model_path="./
                 print(f"Concept names for ID {ids[i]}: {concept_names}")
                 cuis = [name2cui[n] for n in concept_names if n in name2cui]
                 print(f"CUIs for ID {ids[i]}: {cuis}")
-                concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
+                concept_preds.append({"ID": ids[i], "CUIs": ";".join(cuis)})
 
     # Lưu kết quả
     os.makedirs("outputs", exist_ok=True)
@@ -366,14 +313,12 @@ def main():
     parser.add_argument("mode", type=str, choices=["train", "predict"])
     parser.add_argument("--root_path", type=str, required=True)
     parser.add_argument("--cui_path", type=str, default=None)
-    parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--num_epochs", type=int, default=5)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--num_epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     parser.add_argument("--model_path", type=str, default="./model_best.pth")
     parser.add_argument("--threshold", type=float, default=0.3)
-    parser.add_argument("--checkpoint_path", type=str, default=None)
-    parser.add_argument("--start_epoch", type=int, default=2, choices=[1, 2])
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -382,9 +327,7 @@ def main():
             args.batch_size,
             args.num_epochs,
             args.lr,
-            args.model_path,
-            args.checkpoint_path,
-            args.start_epoch
+            args.model_path
         )
         print(f"Using best threshold {best_threshold:.1f} for prediction")
         args.threshold = best_threshold
