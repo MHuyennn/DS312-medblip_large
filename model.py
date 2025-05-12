@@ -1,160 +1,80 @@
 import torch
 import torch.nn as nn
-import re
+import torch.nn.functional as F
+from torchvision.models import resnet101
 
-class FocalLoss(nn.Module):
-    """Focal Loss cho bài toán multi-label classification."""
-    def __init__(self, alpha=1.0, gamma=2.0, reduction='mean'):
-        super(FocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        BCE_loss = nn.BCEWithLogitsLoss(reduction='none')(inputs, targets)
-        pt = torch.exp(-BCE_loss)
-        F_loss = self.alpha * (1-pt)**self.gamma * BCE_loss
-        if self.reduction == 'mean':
-            return F_loss.mean()
-        elif self.reduction == 'sum':
-            return F_loss.sum()
-        else:
-            return F_loss
-
-class ConceptHead(nn.Module):
-    """Module tinh chỉnh đặc trưng hình ảnh cho concept detection."""
-    def __init__(self, hidden_size, dropout_rate=0.3):
-        super(ConceptHead, self).__init__()
-        self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
-        self.ln1 = nn.LayerNorm(hidden_size // 2)
-        self.fc2 = nn.Linear(hidden_size // 2, hidden_size)
-        self.ln2 = nn.LayerNorm(hidden_size)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.relu = nn.ReLU()
-
+class CSRAModule(nn.Module):
+    """Class-Specific Residual Attention module."""
+    def __init__(self, in_channels, num_classes, num_heads=1, lam=0.1):
+        super(CSRAModule, self).__init__()
+        self.num_heads = num_heads
+        self.lam = lam
+        self.num_classes = num_classes
+        
+        # Attention branch: Tạo attention map cho mỗi lớp
+        self.attention_convs = nn.ModuleList([
+            nn.Conv2d(in_channels, num_classes, kernel_size=1)
+            for _ in range(num_heads)
+        ])
+        
+        # Classifier branch: Linear layer cho global features
+        self.classifier = nn.Linear(in_channels, num_classes)
+        
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.ln1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.fc2(x)
-        x = self.ln2(x)
-        return x
+        # x: [batch_size, in_channels, H, W]
+        batch_size = x.size(0)
+        
+        # Classifier branch: Average pooling + linear
+        pooled = F.adaptive_avg_pool2d(x, (1, 1)).view(batch_size, -1)  # [batch_size, in_channels]
+        logits_cls = self.classifier(pooled)  # [batch_size, num_classes]
+        
+        # Attention branch
+        logits_att = []
+        for conv in self.attention_convs:
+            att_map = conv(x)  # [batch_size, num_classes, H, W]
+            att_map = F.softmax(att_map.view(batch_size, self.num_classes, -1), dim=2)
+            att_map = att_map.view(batch_size, self.num_classes, x.size(2), x.size(3))
+            att_features = torch.einsum('bcn,bchw->bc', att_map, x)  # [batch_size, num_classes]
+            logits_att.append(att_features)
+        
+        # Kết hợp các đầu attention
+        logits_att = sum(logits_att) / self.num_heads  # [batch_size, num_classes]
+        
+        # Residual connection với trọng số lam
+        logits = logits_cls + self.lam * logits_att
+        
+        return logits
 
-class MedBLIPMultitask(nn.Module):
-    def __init__(self, vision_encoder, text_decoder, processor):
-        super(MedBLIPMultitask, self).__init__()
-        self.vision_encoder = vision_encoder
-        self.text_decoder = text_decoder
-        self.processor = processor
-        self.concept_embeddings = None
-        hidden_size = vision_encoder.config.hidden_size
-
-        # Concept detection head
-        self.concept_head = ConceptHead(hidden_size=hidden_size, dropout_rate=0.3)
-
-        # Attention mechanism để cải thiện caption generation
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_size,
-            num_heads=8,
-            dropout=0.1,
-            batch_first=True
+class MedCSRAModel(nn.Module):
+    def __init__(self, num_classes=2468, num_heads=1, lam=0.1):
+        super(MedCSRAModel, self).__init__()
+        # ResNet-101 backbone
+        resnet = resnet101(pretrained=True)
+        self.backbone = nn.Sequential(
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,
+            resnet.layer1,
+            resnet.layer2,
+            resnet.layer3,
+            resnet.layer4
         )
-        self.attention_norm = nn.LayerNorm(hidden_size)
-
-        # Dropout để tránh overfitting
-        self.dropout = nn.Dropout(0.3)
-
-        # Fine-tune một phần vision encoder (chỉ các tầng cuối)
-        for param in self.vision_encoder.parameters():
+        self.csra = CSRAModule(
+            in_channels=2048,  # ResNet-101 layer4 output
+            num_classes=num_classes,
+            num_heads=num_heads,
+            lam=lam
+        )
+        
+        # Fine-tune layer4
+        for param in self.backbone.parameters():
             param.requires_grad = False
-        for param in self.vision_encoder.encoder.layers[-4:].parameters():  # Sửa từ layer thành layers
-            param.requires_grad = True  # Fine-tune 4 tầng cuối
-
-    def set_concept_embeddings(self, embeddings):
-        """Set precomputed concept embeddings (Name embeddings)."""
-        self.concept_embeddings = nn.Parameter(embeddings, requires_grad=False)
-
-    def clean_caption(self, caption):
-        """Xử lý hậu kỳ để làm sạch caption."""
-        caption = caption.replace('clopsclops', '').replace('temperatures', '').replace('bravoliac', '')
-        caption = re.sub(r'\b(\w+\s+\w+\s+)\1+', r'\1', caption)
-        caption = re.sub(r'\s*-\s*', ' - ', caption)
-        caption = re.sub(r'[^\w\s.,-]', '', caption)
-        caption = ' '.join(caption.split())
-        if caption and caption[-1] not in '.?!':
-            caption += '.'
-        return caption.strip()
-
-    def forward(self, pixel_values, input_ids=None, attention_mask=None, labels_caption=None, mode="train"):
-        # Encode image
-        image_outputs = self.vision_encoder(pixel_values=pixel_values)
-        image_features = image_outputs.last_hidden_state[:, 0, :]  # CLS token cho concept
-        vision_embeds = image_outputs.last_hidden_state  # Toàn bộ cho caption
-
-        # Concept detection
-        concept_features = self.concept_head(image_features)
-        logits_concept = torch.matmul(concept_features, self.concept_embeddings.T)
-
-        # Attention để tinh chỉnh vision embeds cho caption
-        vision_embeds, _ = self.attention(
-            vision_embeds, vision_embeds, vision_embeds,
-            key_padding_mask=None
-        )
-        vision_embeds = self.attention_norm(vision_embeds + vision_embeds)  # Residual connection
-        vision_embeds = self.dropout(vision_embeds)
-
-        outputs = {}
-
-        if mode == "train":
-            # Caption Prediction
-            caption_outputs = self.text_decoder(
-                encoder_hidden_states=vision_embeds,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels_caption
-            )
-            loss_caption = caption_outputs.loss
-
-            outputs.update({
-                "loss_caption": loss_caption,
-                "logits_caption": caption_outputs.logits,
-                "logits_concept": logits_concept
-            })
-
-        elif mode == "predict_caption":
-            # Dự đoán caption
-            generated_ids = self.text_decoder.generate(
-                encoder_hidden_states=vision_embeds,
-                max_length=200,
-                num_beams=6,
-                no_repeat_ngram_size=3,
-                repetition_penalty=1.8,
-                length_penalty=1.2
-            )
-            captions = self.processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-            captions = [self.clean_caption(caption) for caption in captions]
-            outputs["generated_captions"] = captions
-
-        elif mode == "predict_concept":
-            outputs["logits_concept"] = logits_concept
-
-        elif mode == "predict_both":
-            # Dự đoán cả caption và concept
-            generated_ids = self.text_decoder.generate(
-                encoder_hidden_states=vision_embeds,
-                max_length=200,
-                num_beams=6,
-                no_repeat_ngram_size=3,
-                repetition_penalty=1.8,
-                length_penalty=1.2
-            )
-            captions = self.processor.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-            captions = [self.clean_caption(caption) for caption in captions]
-
-            outputs.update({
-                "generated_captions": captions,
-                "logits_concept": logits_concept
-            })
-
-        return outputs
+        for param in self.backbone[6].parameters():  # layer4
+            param.requires_grad = True
+    
+    def forward(self, pixel_values):
+        # pixel_values: [batch_size, 3, 224, 224]
+        features = self.backbone(pixel_values)  # [batch_size, 2048, 7, 7]
+        logits = self.csra(features)  # [batch_size, num_classes]
+        return {"logits_concept": logits}
