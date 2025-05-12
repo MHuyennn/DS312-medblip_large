@@ -45,7 +45,7 @@ def evaluate_concept(model, dataloader, device, mlb, name2cui, thresholds=np.ara
             if f1 > best_f1:
                 best_f1 = f1
                 best_threshold = threshold
-        print(f"Best threshold: {best_threshold:.1f} with F1-score: {best_f1:.4f}")
+        print(f"Best threshold: {best_threshold:.1f} with F1-score = {best_f1:.4f}")
 
     # Dự đoán với ngưỡng tốt nhất
     result_preds = []
@@ -62,19 +62,28 @@ def main_evaluate(root_path, split="valid"):
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs")
 
-    img_dir = os.path.join(root_path, split, split)
-    concept_csv = os.path.join(img_dir, f"{split}_concepts.csv")
+    # Đường dẫn dữ liệu
+    if split == "test":
+        img_dir = "/kaggle/input/oggy-ds312/test"
+        concept_csv = os.path.join(root_path, "test/test_concepts.csv")  # Giả định có file này
+    else:
+        img_dir = os.path.join(root_path, split, split)
+        concept_csv = os.path.join(img_dir, f"{split}_concepts.csv")
     cui_names_csv = os.path.join(root_path, "cui_names.csv")
 
-    df_con = pd.read_csv(concept_csv)
     df_cui = pd.read_csv(cui_names_csv)
-
     df_cui = df_cui[df_cui["Name"] != "Name nicht gefunden"].drop_duplicates(subset=["Name"]).reset_index(drop=True)
     cui2name = dict(zip(df_cui["CUI"], df_cui["Name"]))
     name2cui = dict(zip(df_cui["Name"], df_cui["CUI"]))
 
-    df = df_con
-    df["Concept_Names"] = df["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
+    if split == "test":
+        # Tạo dataframe giả cho test (không cần ground truth)
+        test_ids = [f.split(".")[0] for f in os.listdir(img_dir) if f.endswith(".jpg")]
+        df = pd.DataFrame({"ID": test_ids, "CUIs": [""] * len(test_ids), "Concept_Names": [[]] * len(test_ids)})
+    else:
+        df_con = pd.read_csv(concept_csv)
+        df = df_con
+        df["Concept_Names"] = df["CUIs"].apply(lambda x: [cui2name[cui] for cui in x.split(";") if cui in cui2name])
 
     name_list = list(df_cui["Name"])
     if len(name_list) != len(set(name_list)):
