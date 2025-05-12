@@ -110,21 +110,12 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
         imratio_list.append(imratio)
     print(f"imratio_list length: {len(imratio_list)}, min: {min(imratio_list):.4f}, max: {max(imratio_list):.4f}")
 
-    # Data augmentation
-    train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-        transforms.ToTensor()
-    ])
-
     # Datasets
     train_dataset = ImgCaptionConceptDataset(
-        df_train, train_img_dir, None, name_list, mlb, mode="train", transform=train_transform
+        df_train, train_img_dir, name_list, mlb, mode="train"
     )
     valid_dataset = ImgCaptionConceptDataset(
-        df_valid, valid_img_dir, None, name_list, mlb, mode="valid"
+        df_valid, valid_img_dir, name_list, mlb, mode="valid"
     )
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
@@ -276,7 +267,7 @@ def predict(root_path, split="test", batch_size=8, cui_path=None, model_path="./
     df_test = pd.DataFrame({"ID": test_ids})
     df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
 
-    dataset = ImgCaptionConceptDataset(df_test, img_dir, None, name_list, mlb, mode="test")
+    dataset = ImgCaptionConceptDataset(df_test, img_dir, name_list, mlb, mode="test")
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Dự đoán
