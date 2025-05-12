@@ -10,8 +10,6 @@ from sklearn.metrics import f1_score
 import numpy as np
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
-from libauc.losses import AUCMLoss
-from libauc.optimizers import PESG
 
 # Tắt parallelism để tránh cảnh báo
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -101,18 +99,6 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
 
-    # Tính imratio cho LibAUC
-    print("Calculating imratio for each concept...")
-    imratio_list = []
-    for i in range(len(name_list)):
-        n_positive = sum([1 for labels in df_train["Concept_Names"] if name_list[i] in labels])
-        imratio = n_positive / len(df_train)
-        imratio_list.append(imratio)
-    print(f"imratio_list length: {len(imratio_list)}, min: {min(imratio_list):.4f}, max: {max(imratio_list):.4f}")
-    # Tính imratio trung bình cho AUCMLoss
-    imratio = np.mean(imratio_list)
-    print(f"Average imratio: {imratio:.4f}")
-
     # Datasets
     train_dataset = ImgCaptionConceptDataset(
         df_train, train_img_dir, name_list, mlb, mode="train"
@@ -130,9 +116,9 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
         model = nn.DataParallel(model)
         print("Model wrapped in DataParallel for multi-GPU training")
 
-    # LibAUC loss và optimizer
-    criterion_concept = AUCMLoss(imratio=imratio)
-    optimizer = PESG(model.parameters(), loss_fn=criterion_concept, lr=lr, margin=1.0, weight_decay=1e-5)
+    # Loss và optimizer
+    criterion_concept = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     # Khởi tạo biến theo dõi
@@ -154,12 +140,11 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
             logits = outputs["logits_concept"]
             preds = torch.sigmoid(logits)
 
-            loss = criterion_concept(preds, labels_concept)
+            loss = criterion_concept(logits, labels_concept)
             loss.backward()
             
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            optimizer.update_regularizer()
 
             running_loss += loss.item()
 
@@ -182,7 +167,7 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
                 logits = outputs["logits_concept"]
                 preds = torch.sigmoid(logits)
 
-                loss = criterion_concept(preds, labels_concept)
+                loss = criterion_concept(logits, labels_concept)
                 valid_loss += loss.item()
 
                 probs = preds.cpu().numpy()
@@ -201,7 +186,7 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
 
         # Save best model dựa trên F1-score
         if valid_f1 > best_f1:
-            best_f1 = best_f1
+            best_f1 = valid_f1
             state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
             torch.save({
                 "model_state_dict": state_dict,
