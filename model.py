@@ -13,12 +13,7 @@ class CSRA(nn.Module):
         # x: [batch_size, in_features, height, width]
         batch_size, in_features, height, width = x.size()
         
-        # Pooling để giảm chiều trước khi qua fc
-        x_pooled = x.mean(dim=(2, 3))  # [batch_size, in_features]
-        att_map = torch.sigmoid(self.fc(x_pooled))  # [batch_size, num_classes]
-        
-        # Tạo attention map giả lập (hoặc giữ fc để tính trên spatial dimensions)
-        # Nếu muốn giữ spatial info, cần reshape x trước khi qua fc
+        # Tính attention map
         x_flat = x.view(batch_size, in_features, -1)  # [batch_size, in_features, height*width]
         att_map = torch.sigmoid(self.fc(x_flat.permute(0, 2, 1)))  # [batch_size, height*width, num_classes]
         att_map = att_map.permute(0, 2, 1)  # [batch_size, num_classes, height*width]
@@ -31,11 +26,23 @@ class CSRA(nn.Module):
 class MedCSRAModel(nn.Module):
     def __init__(self, num_classes=2468, num_heads=1, lam=0.1):
         super(MedCSRAModel, self).__init__()
+        # Load ResNet-101 pre-trained
         self.backbone = models.resnet101(pretrained=True)
-        self.backbone.fc = nn.Identity()  # Loại bỏ fully connected layer cuối
         
-        # Lấy số lượng đặc trưng từ backbone
-        in_features = 2048  # ResNet-101 output features
+        # Lấy đặc trưng từ layer4 (trước global average pooling)
+        self.backbone = nn.Sequential(
+            self.backbone.conv1,
+            self.backbone.bn1,
+            self.backbone.relu,
+            self.backbone.maxpool,
+            self.backbone.layer1,
+            self.backbone.layer2,
+            self.backbone.layer3,
+            self.backbone.layer4
+        )
+        
+        # Lấy số lượng đặc trưng từ layer4
+        in_features = 2048  # ResNet-101 layer4 output features
         self.csra = CSRA(in_features=in_features, num_classes=num_classes, lam=lam)
         self.fc = nn.Linear(in_features, num_classes)
         
