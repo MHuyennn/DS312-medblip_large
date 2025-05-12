@@ -50,7 +50,7 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
             best_threshold = threshold
 
     print(f"Best threshold: {best_threshold:.1f} with F1-score = {best_f1:.4f}")
-    return best_threshold
+    return best_threshold, best_f1
 
 def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best.pth"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -181,12 +181,10 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
         avg_valid_loss = valid_loss / len(valid_loader)
         all_true_labels = np.concatenate(all_true_labels, axis=0)
         all_probs = np.concatenate(all_probs, axis=0)
-        valid_f1 = f1_score(all_true_labels, (all_probs > best_threshold).astype(int), average="micro")
-
+        
+        # Cập nhật ngưỡng tối ưu và F1-score
+        best_threshold, valid_f1 = evaluate_threshold(model, valid_loader, name_list, device)
         print(f"Validation Loss: {avg_valid_loss:.4f}, F1-score (threshold {best_threshold:.1f}): {valid_f1:.4f}")
-
-        # Cập nhật ngưỡng tối ưu
-        best_threshold = evaluate_threshold(model, valid_loader, name_list, device)
 
         # Save best model dựa trên F1-score
         if valid_f1 > best_f1:
