@@ -10,7 +10,7 @@ from sklearn.metrics import f1_score
 import numpy as np
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
-from libauc.losses import AUCM_MultiLabel
+from libauc.losses import AUCMLoss
 from libauc.optimizers import PESG
 
 # Tắt parallelism để tránh cảnh báo
@@ -109,6 +109,9 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
         imratio = n_positive / len(df_train)
         imratio_list.append(imratio)
     print(f"imratio_list length: {len(imratio_list)}, min: {min(imratio_list):.4f}, max: {max(imratio_list):.4f}")
+    # Tính imratio trung bình cho AUCMLoss
+    imratio = np.mean(imratio_list)
+    print(f"Average imratio: {imratio:.4f}")
 
     # Datasets
     train_dataset = ImgCaptionConceptDataset(
@@ -128,7 +131,7 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
         print("Model wrapped in DataParallel for multi-GPU training")
 
     # LibAUC loss và optimizer
-    criterion_concept = AUCM_MultiLabel(imratio=imratio_list, device=device)
+    criterion_concept = AUCMLoss(imratio=imratio)
     optimizer = PESG(model.parameters(), lr=lr, margin=1.0, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
 
