@@ -6,7 +6,8 @@ import torchvision.models as models
 class CSRA(nn.Module):
     def __init__(self, in_features, num_classes, lam=0.1):
         super(CSRA, self).__init__()
-        self.fc = nn.Linear(in_features, num_classes)
+        self.att_fc = nn.Linear(in_features, in_features)  # Attention map giữ in_features
+        self.fc = nn.Linear(in_features, num_classes)     # Ánh xạ về num_classes
         self.lam = lam
 
     def forward(self, x):
@@ -15,13 +16,16 @@ class CSRA(nn.Module):
         
         # Tính attention map
         x_flat = x.view(batch_size, in_features, -1)  # [batch_size, in_features, height*width]
-        att_map = torch.sigmoid(self.fc(x_flat.permute(0, 2, 1)))  # [batch_size, height*width, num_classes]
-        att_map = att_map.permute(0, 2, 1)  # [batch_size, num_classes, height*width]
+        att_map = torch.sigmoid(self.att_fc(x_flat.permute(0, 2, 1)))  # [batch_size, height*width, in_features]
+        att_map = att_map.permute(0, 2, 1)  # [batch_size, in_features, height*width]
         
         # Einsum để tính attention-weighted features
-        att_features = torch.einsum('bcn,bcn->bc', att_map, x_flat)  # [batch_size, num_classes]
+        att_features = torch.einsum('bcn,bcn->bc', att_map, x_flat)  # [batch_size, in_features]
         
-        return att_features
+        # Ánh xạ về num_classes
+        logits = self.fc(att_features)  # [batch_size, num_classes]
+        
+        return logits
 
 class MedCSRAModel(nn.Module):
     def __init__(self, num_classes=2468, num_heads=1, lam=0.1):
