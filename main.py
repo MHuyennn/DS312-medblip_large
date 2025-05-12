@@ -132,7 +132,7 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
 
     # LibAUC loss và optimizer
     criterion_concept = AUCMLoss(imratio=imratio)
-    optimizer = PESG(model.parameters(), lr=lr, margin=1.0, weight_decay=1e-5)
+    optimizer = PESG(model.parameters(), loss_fn=criterion_concept, lr=lr, margin=1.0, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     # Khởi tạo biến theo dõi
@@ -201,7 +201,7 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
 
         # Save best model dựa trên F1-score
         if valid_f1 > best_f1:
-            best_f1 = valid_f1
+            best_f1 = best_f1
             state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
             torch.save({
                 "model_state_dict": state_dict,
@@ -228,7 +228,7 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
     print(f"Final best threshold: {best_threshold:.1f}")
     return best_threshold
 
-def predict(root_path, split="test", batch_size=8, cui_path=None, model_path="./model_best.pth", threshold=0.3):
+def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold=0.3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs for prediction")
@@ -237,9 +237,8 @@ def predict(root_path, split="test", batch_size=8, cui_path=None, model_path="./
     if split == "test":
         img_dir = "/kaggle/input/oggy-ds312/test"
     else:
-        img_dir = os.path.join(root_path, split, split)
-    cui_path = cui_path if cui_path else root_path
-    cui_names_csv = os.path.join(cui_path, "cui_names.csv")
+        img_dir = os.path.join("/kaggle/input/if-u-know-u-know", split, split)
+    cui_names_csv = "/kaggle/input/if-u-know-u-know/cui_names.csv"
 
     # Tải dữ liệu CUI
     df_cui = pd.read_csv(cui_names_csv)
@@ -308,8 +307,7 @@ def predict(root_path, split="test", batch_size=8, cui_path=None, model_path="./
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", type=str, choices=["train", "predict"])
-    parser.add_argument("--root_path", type=str, required=True)
-    parser.add_argument("--cui_path", type=str, default=None)
+    parser.add_argument("--root_path", type=str, help="Root path chứa dữ liệu (chỉ cần cho train)")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=0.1)
@@ -319,6 +317,8 @@ def main():
     args = parser.parse_args()
 
     if args.mode == "train":
+        if not args.root_path:
+            raise ValueError("root_path là bắt buộc cho mode train")
         best_threshold = train(
             args.root_path,
             args.batch_size,
@@ -330,10 +330,8 @@ def main():
         args.threshold = best_threshold
     elif args.mode == "predict":
         predict(
-            args.root_path,
             args.split,
             args.batch_size,
-            args.cui_path,
             args.model_path,
             args.threshold
         )
