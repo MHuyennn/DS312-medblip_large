@@ -28,7 +28,7 @@ class CSRA(nn.Module):
         return logits
 
 class MedCSRAModel(nn.Module):
-    def __init__(self, num_classes=2468, num_heads=1, lam=0.1):
+    def __init__(self, num_classes, num_heads=1, lam=0.1):
         super(MedCSRAModel, self).__init__()
         # Load ResNet-101 pre-trained
         self.backbone = models.resnet101(pretrained=True)
