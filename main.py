@@ -51,7 +51,7 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
             best_f1 = f1
             best_threshold = threshold
 
-    print(f"Best threshold: {best_threshold:.1f} with F1-score: {best_f1:.4f}")
+    print(f"Best threshold: {best_threshold:.1f} with F1-score = {best_f1:.4f}")
     return best_threshold
 
 def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best.pth"):
@@ -231,7 +231,10 @@ def predict(root_path, split="test", batch_size=8, cui_path=None, model_path="./
     print(f"Using {num_gpus} GPUs for prediction")
 
     # Đường dẫn dữ liệu
-    img_dir = os.path.join(root_path, split, split)
+    if split == "test":
+        img_dir = "/kaggle/input/oggy-ds312/test"
+    else:
+        img_dir = os.path.join(root_path, split, split)
     cui_path = cui_path if cui_path else root_path
     cui_names_csv = os.path.join(cui_path, "cui_names.csv")
 
