@@ -11,17 +11,20 @@ import numpy as np
 from transformers import AutoProcessor, BlipForConditionalGeneration
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
+from libauc.losses import AUCM_MultiLabel
+from libauc.optimizers import PESG
+
+# Tắt parallelism cho tokenizer để tránh cảnh báo
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 from dataset import ImgCaptionConceptDataset
-from model import MedBLIPMultitask, FocalLoss
-from evaluate import evaluate_caption, evaluate_concept
+from model import MedBLIPMultitask
 
 def load_cui_name_embeddings(df_cui, processor, device, expected_num_concepts=2468):
     """Tạo embeddings từ danh sách Name concepts, đảm bảo đúng số lượng concepts."""
     names = df_cui["Name"].drop_duplicates().tolist()
     print(f"Initial number of unique names: {len(names)}")
 
-    # Nếu số concept ít hơn expected_num_concepts, thêm dummy concepts
     if len(names) < expected_num_concepts:
         print(f"Adding {expected_num_concepts - len(names)} dummy concepts to match checkpoint")
         dummy_names = [f"dummy_concept_{i}" for i in range(expected_num_concepts - len(names))]
@@ -78,21 +81,17 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     print(f"Best threshold: {best_threshold:.1f} with F1-score: {best_f1:.4f}")
     return best_threshold
 
-def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_best.pth", checkpoint_path=None, start_epoch=2):
+def train(root_path, batch_size=4, num_epochs=5, lr=0.1, save_path="./model_best.pth", checkpoint_path=None, start_epoch=2):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
     valid_img_dir = os.path.join(root_path, "valid/valid")
-    caption_train_csv = os.path.join(train_img_dir, "train_captions.csv")
     concept_train_csv = os.path.join(train_img_dir, "train_concepts.csv")
-    caption_valid_csv = os.path.join(valid_img_dir, "valid_captions.csv")
     concept_valid_csv = os.path.join(valid_img_dir, "valid_concepts.csv")
     cui_names_csv = os.path.join(root_path, "cui_names.csv")
 
-    df_cap_train = pd.read_csv(caption_train_csv)
     df_con_train = pd.read_csv(concept_train_csv)
-    df_cap_valid = pd.read_csv(caption_valid_csv)
     df_con_valid = pd.read_csv(concept_valid_csv)
     df_cui = pd.read_csv(cui_names_csv)
 
@@ -101,8 +100,8 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     
     cui2name = dict(zip(df_cui["CUI"], df_cui["Name"]))
     name2cui = {v: k for k, v in cui2name.items()}
-    df_train = pd.merge(df_cap_train, df_con_train, on="ID")
-    df_valid = pd.merge(df_cap_valid, df_con_valid, on="ID")
+    df_train = df_con_train
+    df_valid = df_con_valid
 
     df_train["Concept_Names"] = df_train["CUIs"].apply(
         lambda x: [cui2name[cui] for cui in str(x).split(";") if cui in cui2name]
@@ -112,6 +111,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     )
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+    processor.image_processor.do_rescale = False  # Tắt rescaling để tránh cảnh báo
 
     # Lấy danh sách concept names từ tập train
     concept_names_in_train = set()
@@ -135,6 +135,15 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
 
+    # Tính imratio cho LibAUC
+    print("Calculating imratio for each concept...")
+    imratio_list = []
+    for i in range(len(name_list)):
+        n_positive = sum([1 for labels in df_train["Concept_Names"] if name_list[i] in labels])
+        imratio = n_positive / len(df_train)
+        imratio_list.append(imratio)
+    print(f"imratio_list length: {len(imratio_list)}, min: {min(imratio_list):.4f}, max: {max(imratio_list):.4f}")
+
     # Data augmentation mạnh hơn
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(224, scale=(0.8, 1.0)),
@@ -152,8 +161,8 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         df_valid, valid_img_dir, processor, name_list, mlb, mode="valid"
     )
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Model
     blip_base = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
@@ -164,8 +173,9 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     ).to(device)
     model.set_concept_embeddings(name_embeddings)
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    criterion_concept = FocalLoss(alpha=1.0, gamma=2.0)
+    # LibAUC loss và optimizer
+    criterion_concept = AUCM_MultiLabel(imratio=imratio_list, device=device)
+    optimizer = PESG(model.parameters(), lr=lr, margin=1.0, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
 
     # Khởi tạo biến theo dõi
@@ -175,12 +185,11 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     # Tải checkpoint nếu có
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"], strict=False)  # Bỏ qua tham số không khớp
-        best_f1 = checkpoint.get("best_f1", 0.0)  # Lấy best_f1, mặc định 0.0 nếu không có
-        best_threshold = checkpoint.get("best_threshold", 0.3)  # Lấy best_threshold, mặc định 0.3 nếu không có
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        best_f1 = checkpoint.get("best_f1", 0.0)
+        best_threshold = checkpoint.get("best_threshold", 0.3)
         print(f"✅ Loaded checkpoint from {checkpoint_path} (best_f1: {best_f1:.4f}, best_threshold: {best_threshold:.1f})")
-        print("Note: Some parameters (e.g., ConceptHead, MultiheadAttention) were not loaded and will be randomly initialized.")
-        print("Note: Optimizer state was not loaded due to parameter mismatch. Using new optimizer.")
+        print("Note: Some parameters (e.g., ConceptHead) were not loaded and will be randomly initialized.")
     else:
         print("No checkpoint found. Starting training with new optimizer.")
 
@@ -193,31 +202,18 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
             optimizer.zero_grad()
 
             pixel_values = batch["pixel_values"].to(device)
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            labels_caption = batch["labels_caption"].to(device)
             labels_concept = batch["labels_concept"].to(device)
 
-            outputs = model(
-                pixel_values,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels_caption=labels_caption,
-                mode="train"
-            )
-            loss_caption = outputs["loss_caption"]
+            outputs = model(pixel_values, mode="predict_concept")
             logits_concept = outputs["logits_concept"]
+            preds = torch.sigmoid(logits_concept)
 
-            if loss_caption is None:
-                raise ValueError("loss_caption is None. Check model output or input data.")
-
-            loss_concept = criterion_concept(logits_concept, labels_concept)
-            loss = loss_caption + loss_concept
+            loss = criterion_concept(preds, labels_concept)
             loss.backward()
             
-            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            optimizer.update_regularizer()
 
             running_loss += loss.item()
 
@@ -230,57 +226,36 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
         valid_loss = 0.0
         all_true_labels = []
         all_probs = []
-        all_captions = []
-        all_true_captions = []
 
         with torch.no_grad():
             for batch in valid_loader:
                 pixel_values = batch["pixel_values"].to(device)
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                labels_caption = batch["labels_caption"].to(device)
                 labels_concept = batch["labels_concept"].to(device)
 
-                outputs = model(
-                    pixel_values,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels_caption=labels_caption,
-                    mode="train"
-                )
-                loss_caption = outputs["loss_caption"]
+                outputs = model(pixel_values, mode="predict_concept")
                 logits_concept = outputs["logits_concept"]
+                preds = torch.sigmoid(logits_concept)
 
-                loss = loss_caption + criterion_concept(logits_concept, labels_concept)
+                loss = criterion_concept(preds, labels_concept)
                 valid_loss += loss.item()
 
-                probs = torch.sigmoid(logits_concept).cpu().numpy()
+                probs = preds.cpu().numpy()
                 all_true_labels.append(labels_concept.cpu().numpy())
                 all_probs.append(probs)
-
-                # Đánh giá caption
-                caption_outputs = model(pixel_values, mode="predict_caption")
-                all_captions.extend(caption_outputs["generated_captions"])
-                all_true_captions.extend(
-                    processor.tokenizer.batch_decode(labels_caption, skip_special_tokens=True)
-                )
 
         avg_valid_loss = valid_loss / len(valid_loader)
         all_true_labels = np.concatenate(all_true_labels, axis=0)
         all_probs = np.concatenate(all_probs, axis=0)
         valid_f1 = f1_score(all_true_labels, (all_probs > best_threshold).astype(int), average="micro")
 
-        # Đánh giá caption (giả sử evaluate_caption trả về BLEU score)
-        bleu_score = evaluate_caption(all_true_captions, all_captions)
-        print(f"Validation Loss: {avg_valid_loss:.4f}, F1-score (threshold {best_threshold:.1f}): {valid_f1:.4f}, BLEU: {bleu_score:.4f}")
+        print(f"Validation Loss: {avg_valid_loss:.4f}, F1-score (threshold {best_threshold:.1f}): {valid_f1:.4f}")
 
         # Cập nhật ngưỡng tối ưu
         best_threshold = evaluate_threshold(model, valid_loader, name_list, device)
 
-        # Save best model dựa trên tổng hợp F1 và BLEU
-        combined_score = 0.7 * valid_f1 + 0.3 * bleu_score
-        if combined_score > best_f1:
-            best_f1 = combined_score
+        # Save best model dựa trên F1-score
+        if valid_f1 > best_f1:
+            best_f1 = valid_f1
             torch.save({
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -288,7 +263,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
                 "best_threshold": best_threshold,
                 "epoch": epoch
             }, save_path)
-            print(f"✅ Saved best model to {save_path} with Combined Score: {best_f1:.4f}")
+            print(f"✅ Saved best model to {save_path} with F1-score: {best_f1:.4f}")
 
         # Lưu checkpoint mỗi epoch
         checkpoint = {
@@ -305,7 +280,7 @@ def train(root_path, batch_size=4, num_epochs=5, lr=1e-5, save_path="./model_bes
     print(f"Final best threshold: {best_threshold:.1f}")
     return best_threshold
 
-def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, model_path="./model_best.pth", threshold=0.3):
+def predict(root_path, split="test", batch_size=4, cui_path=None, model_path="./model_best.pth", threshold=0.3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Đường dẫn dữ liệu
@@ -315,6 +290,7 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
 
     # Tải processor và dữ liệu CUI
     processor = AutoProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+    processor.image_processor.do_rescale = False
     df_cui = pd.read_csv(cui_names_csv)
     df_cui = df_cui[df_cui["Name"] != "Name nicht gefunden"].drop_duplicates(subset=["Name"]).reset_index(drop=True)
     name_list = list(df_cui["Name"])
@@ -351,14 +327,12 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
     test_ids = [f.split(".")[0] for f in os.listdir(img_dir) if f.endswith(".jpg")]
     print(f"Number of test images: {len(test_ids)}")
     df_test = pd.DataFrame({"ID": test_ids})
-    df_test["Caption"] = [""] * len(df_test)
     df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
 
     dataset = ImgCaptionConceptDataset(df_test, img_dir, processor, name_list, mlb, mode="test")
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Dự đoán
-    caption_preds = []
     concept_preds = []
 
     with torch.no_grad():
@@ -366,37 +340,26 @@ def predict(root_path, split="test", task="both", batch_size=4, cui_path=None, m
             pixel_values = batch["pixel_values"].to(device)
             ids = batch["id"]
 
-            outputs = model(pixel_values, mode="predict_both" if task == "both" else f"predict_{task}")
+            outputs = model(pixel_values, mode="predict_concept")
+            logits = outputs["logits_concept"]
+            probs = torch.sigmoid(logits).cpu().numpy()
 
-            if task in ["caption", "both"]:
-                captions = outputs["generated_captions"]
-                for i, id in enumerate(ids):
-                    caption_preds.append({"ID": id, "Caption": captions[i]})
+            for i in range(len(ids)):
+                top_k = 5
+                top_probs, top_indices = torch.topk(torch.tensor(probs[i]), k=top_k)
+                top_names = [name_list[idx] for idx in top_indices]
+                print(f"Top {top_k} concepts for ID {ids[i]}: {list(zip(top_names, top_probs.tolist()))}")
 
-            if task in ["concept", "both"]:
-                logits = outputs["logits_concept"]
-                probs = torch.sigmoid(logits).cpu().numpy()
-
-                for i in range(len(ids)):
-                    top_k = 5
-                    top_probs, top_indices = torch.topk(torch.tensor(probs[i]), k=top_k)
-                    top_names = [name_list[idx] for idx in top_indices]
-                    print(f"Top {top_k} concepts for ID {ids[i]}: {list(zip(top_names, top_probs.tolist()))}")
-
-                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > threshold]
-                    print(f"Concept names for ID {ids[i]}: {concept_names}")
-                    cuis = [name2cui[n] for n in concept_names if n in name2cui]
-                    print(f"CUIs for ID {ids[i]}: {cuis}")
-                    concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
+                concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > threshold]
+                print(f"Concept names for ID {ids[i]}: {concept_names}")
+                cuis = [name2cui[n] for n in concept_names if n in name2cui]
+                print(f"CUIs for ID {ids[i]}: {cuis}")
+                concept_preds.append({"ID": id, "CUIs": ";".join(cuis)})
 
     # Lưu kết quả
     os.makedirs("outputs", exist_ok=True)
-    if task in ["caption", "both"]:
-        pd.DataFrame(caption_preds).to_csv("outputs/caption_predictions.csv", index=False)
-        print("✅ Đã lưu dự đoán chú thích vào outputs/caption_predictions.csv")
-    if task in ["concept", "both"]:
-        pd.DataFrame(concept_preds).to_csv("outputs/concept_predictions.csv", index=False)
-        print("✅ Đã lưu dự đoán khái niệm vào outputs/concept_predictions.csv")
+    pd.DataFrame(concept_preds).to_csv("outputs/concept_predictions.csv", index=False)
+    print("✅ Đã lưu dự đoán khái niệm vào outputs/concept_predictions.csv")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -405,8 +368,7 @@ def main():
     parser.add_argument("--cui_path", type=str, default=None)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-5)
-    parser.add_argument("--task", type=str, choices=["caption", "concept", "both"], default="both")
+    parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     parser.add_argument("--model_path", type=str, default="./model_best.pth")
     parser.add_argument("--threshold", type=float, default=0.3)
@@ -430,7 +392,6 @@ def main():
         predict(
             args.root_path,
             args.split,
-            args.task,
             args.batch_size,
             args.cui_path,
             args.model_path,
