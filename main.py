@@ -95,6 +95,10 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
+    # Tính num_classes dựa trên name_list
+    num_classes = len(name_list)
+    print(f"Number of classes: {num_classes}")
+
     # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
@@ -111,7 +115,7 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
     valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Model
-    model = MedCSRAModel(num_classes=2468, num_heads=1, lam=0.1).to(device)
+    model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1).to(device)
     if num_gpus > 1:
         model = nn.DataParallel(model)
         print("Model wrapped in DataParallel for multi-GPU training")
@@ -235,9 +239,13 @@ def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold
     if len(name_list) != len(set(name_list)):
         raise ValueError(f"Duplicate names found in name_list: {[name for name in set(name_list) if name_list.count(name) > 1]}")
 
+    # Tính num_classes
+    num_classes = len(name_list)
+    print(f"Number of classes: {num_classes}")
+
     # Tải mô hình
     try:
-        model = MedCSRAModel(num_classes=2468, num_heads=1, lam=0.1).to(device)
+        model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1).to(device)
         checkpoint = torch.load(model_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         if num_gpus > 1:
