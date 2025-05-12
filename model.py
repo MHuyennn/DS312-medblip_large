@@ -19,7 +19,7 @@ class CSRA(nn.Module):
         att_map = att_map.permute(0, 2, 1)  # [batch_size, num_classes, height*width]
         
         # Einsum để tính attention-weighted features
-        att_features = torch.einsum('bcn,bchn->bc', att_map, x.view(batch_size, in_features, height*width))  # [batch_size, num_classes]
+        att_features = torch.einsum('bcn,bcn->bc', att_map, x_flat)  # [batch_size, num_classes]
         
         return att_features
 
