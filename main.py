@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_score, recall_score
 import numpy as np
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
@@ -17,7 +17,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from dataset import ImgCaptionConceptDataset
 from model import MedCSRAModel
 
-def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.arange(0.1, 0.6, 0.1)):
+def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.arange(0.05, 0.6, 0.05)):
     """Tìm ngưỡng tối ưu cho concept prediction dựa trên F1-score trên tập valid."""
     model.eval()
     all_true_labels = []
@@ -44,15 +44,15 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     for threshold in thresholds:
         pred_labels = (all_probs > threshold).astype(int)
         f1 = f1_score(all_true_labels, pred_labels, average="micro")
-        print(f"Threshold {threshold:.1f}: F1-score = {f1:.4f}")
+        print(f"Threshold {threshold:.2f}: F1-score = {f1:.4f}")
         if f1 > best_f1:
             best_f1 = f1
             best_threshold = threshold
 
-    print(f"Best threshold: {best_threshold:.1f} with F1-score = {best_f1:.4f}")
+    print(f"Best threshold: {best_threshold:.2f} with F1-score = {best_f1:.4f}")
     return best_threshold, best_f1
 
-def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best.pth"):
+def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_best.pth", patience=5, min_delta=0.001):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs")
@@ -128,9 +128,15 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
     # Khởi tạo biến theo dõi
     best_f1 = 0.0
     best_threshold = 0.3
+    epochs_no_improve = 0
+    early_stop = False
 
     # Training loop
     for epoch in range(num_epochs):
+        if early_stop:
+            print(f"Early stopping triggered at epoch {epoch}")
+            break
+
         model.train()
         running_loss = 0.0
 
@@ -184,11 +190,15 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
         
         # Cập nhật ngưỡng tối ưu và F1-score
         best_threshold, valid_f1 = evaluate_threshold(model, valid_loader, name_list, device)
-        print(f"Validation Loss: {avg_valid_loss:.4f}, F1-score (threshold {best_threshold:.1f}): {valid_f1:.4f}")
+        valid_precision = precision_score(all_true_labels, (all_probs > best_threshold).astype(int), average="micro")
+        valid_recall = recall_score(all_true_labels, (all_probs > best_threshold).astype(int), average="micro")
+        print(f"Validation Loss: {avg_valid_loss:.4f}, Precision: {valid_precision:.4f}, Recall: {valid_recall:.4f}, F1-score (threshold {best_threshold:.2f}): {valid_f1:.4f}")
 
-        # Save best model dựa trên F1-score
-        if valid_f1 > best_f1:
+        # Save best model nếu F1-score cải thiện
+        if valid_f1 > best_f1 + min_delta:
             best_f1 = valid_f1
+            best_threshold = best_threshold
+            epochs_no_improve = 0
             state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
             torch.save({
                 "model_state_dict": state_dict,
@@ -198,21 +208,16 @@ def train(root_path, batch_size=8, num_epochs=2, lr=0.1, save_path="./model_best
                 "epoch": epoch
             }, save_path)
             print(f"✅ Saved best model to {save_path} with F1-score: {best_f1:.4f}")
+        else:
+            epochs_no_improve += 1
+            print(f"No improvement in F1-score. Epochs without improvement: {epochs_no_improve}/{patience}")
 
-        # Lưu checkpoint mỗi epoch
-        state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
-        checkpoint = {
-            "model_state_dict": state_dict,
-            "optimizer_state_dict": optimizer.state_dict(),
-            "best_f1": best_f1,
-            "best_threshold": best_threshold,
-            "epoch": epoch
-        }
-        checkpoint_path_epoch = f"/kaggle/working/checkpoint_epoch{epoch + 1}.pth"
-        torch.save(checkpoint, checkpoint_path_epoch)
-        print(f"✅ Saved checkpoint to {checkpoint_path_epoch}")
+        # Early stopping
+        if epochs_no_improve >= patience:
+            early_stop = True
+            print(f"Early stopping: No improvement in F1-score for {patience} epochs.")
 
-    print(f"Final best threshold: {best_threshold:.1f}")
+    print(f"Final best threshold: {best_threshold:.2f} with F1-score: {best_f1:.4f}")
     return best_threshold
 
 def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold=0.3):
@@ -300,8 +305,8 @@ def main():
     parser.add_argument("mode", type=str, choices=["train", "predict"])
     parser.add_argument("--root_path", type=str, help="Root path chứa dữ liệu (chỉ cần cho train)")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--num_epochs", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--num_epochs", type=int, default=20)
+    parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     parser.add_argument("--model_path", type=str, default="./model_best.pth")
     parser.add_argument("--threshold", type=float, default=0.3)
@@ -317,7 +322,7 @@ def main():
             args.lr,
             args.model_path
         )
-        print(f"Using best threshold {best_threshold:.1f} for prediction")
+        print(f"Using best threshold {best_threshold:.2f} for prediction")
         args.threshold = best_threshold
     elif args.mode == "predict":
         predict(
