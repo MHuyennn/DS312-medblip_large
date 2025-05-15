@@ -52,7 +52,7 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     print(f"Best threshold: {best_threshold:.2f} with F1-score = {best_f1:.4f}")
     return best_threshold, best_f1
 
-def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_best.pth", patience=5, min_delta=0.001):
+def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_best.pth", patience=5, min_delta=0.001, start_epoch=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs")
@@ -125,14 +125,27 @@ def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_b
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
 
-    # Khởi tạo biến theo dõi
+    # Load checkpoint nếu có
     best_f1 = 0.0
     best_threshold = 0.3
+    if os.path.exists(save_path) and start_epoch > 0:
+        checkpoint = torch.load(save_path, map_location=device)
+        if num_gpus > 1:
+            model.module.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        best_f1 = checkpoint["best_f1"]
+        best_threshold = checkpoint["best_threshold"]
+        start_epoch = checkpoint["epoch"] + 1
+        print(f"Resuming training from epoch {start_epoch} with best F1-score: {best_f1:.4f}")
+
+    # Khởi tạo biến theo dõi
     epochs_no_improve = 0
     early_stop = False
 
     # Training loop
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         if early_stop:
             print(f"Early stopping triggered at epoch {epoch}")
             break
@@ -310,6 +323,7 @@ def main():
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     parser.add_argument("--model_path", type=str, default="./model_best.pth")
     parser.add_argument("--threshold", type=float, default=0.3)
+    parser.add_argument("--start_epoch", type=int, default=0, help="Epoch để tiếp tục huấn luyện (dùng khi resume)")
     args = parser.parse_args()
 
     if args.mode == "train":
@@ -320,7 +334,8 @@ def main():
             args.batch_size,
             args.num_epochs,
             args.lr,
-            args.model_path
+            args.model_path,
+            start_epoch=args.start_epoch
         )
         print(f"Using best threshold {best_threshold:.2f} for prediction")
         args.threshold = best_threshold
