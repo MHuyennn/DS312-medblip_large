@@ -34,17 +34,22 @@ class CSRA(nn.Module):
 class MedCSRAModel(nn.Module):
     def __init__(self, num_classes, num_heads=1, lam=0.1, dropout=0.5):
         super(MedCSRAModel, self).__init__()
-        self.backbone = models.densenet121(pretrained=True)
-        self.backbone = nn.Sequential(*list(self.backbone.features.children()))
+        # Load DenseNet121 với weights IMAGENET1K_V1
+        self.backbone = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
         
-        # Đóng băng các layer
+        # Lấy các layer từ DenseNet121
+        backbone_layers = list(self.backbone.children())
+        self.backbone = nn.Sequential(*backbone_layers[:-1])  # Loại bỏ lớp fully connected cuối (classifier)
+        
+        # Đóng băng tất cả các layer
         for param in self.backbone.parameters():
             param.requires_grad = False
-        # Mở block cuối để fine-tune
-        for param in self.backbone.features.denseblock4.parameters():
+        
+        # Mở denseblock4 để fine-tune (denseblock4 là layer thứ 6 trong backbone_layers)
+        for param in backbone_layers[6].parameters():  # denseblock4 là layer 6
             param.requires_grad = True
         
-        in_features = 1024  # DenseNet121 output features
+        in_features = 1024  # Output features của DenseNet121 trước classifier
         self.csra = CSRA(in_features=in_features, num_classes=num_classes, num_heads=num_heads, lam=lam, dropout=dropout)
         self.fc = nn.Linear(in_features, num_classes)
         self.lam = nn.Parameter(torch.tensor(lam))
@@ -52,9 +57,10 @@ class MedCSRAModel(nn.Module):
         self.num_heads = num_heads
 
     def forward(self, x):
-        features = self.backbone(x)
-        logits_csra = self.csra(features)
-        features_pooled = features.mean(dim=(2, 3))
-        logits_global = self.fc(features_pooled)
+        features = self.backbone(x)  # [batch_size, 1024, 7, 7]
+        # Global average pooling để giảm kích thước không gian
+        features = F.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)  # [batch_size, 1024]
+        logits_csra = self.csra(features.unsqueeze(-1).unsqueeze(-1))  # Thêm chiều không gian cho CSRA
+        logits_global = self.fc(features)
         logits = (1 - self.lam) * logits_global + self.lam * logits_csra
         return {"logits_concept": logits}
