@@ -37,17 +37,21 @@ class MedCSRAModel(nn.Module):
         # Load DenseNet121 với weights IMAGENET1K_V1
         self.backbone = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
         
-        # Lấy các layer từ DenseNet121
-        backbone_layers = list(self.backbone.children())
-        self.backbone = nn.Sequential(*backbone_layers[:-1])  # Loại bỏ lớp fully connected cuối (classifier)
+        # Lấy phần features của DenseNet121
+        self.backbone_features = self.backbone.features  # Sequential chứa conv0, norm0, ..., denseblock4, norm5
+        self.backbone = nn.Sequential(self.backbone_features)  # Chỉ giữ features, bỏ classifier
         
-        # Đóng băng tất cả các layer
+        # Đóng băng tất cả các layer trong features
         for param in self.backbone.parameters():
             param.requires_grad = False
         
-        # Mở denseblock4 để fine-tune (denseblock4 là layer thứ 6 trong backbone_layers)
-        for param in backbone_layers[6].parameters():  # denseblock4 là layer 6
-            param.requires_grad = True
+        # Mở denseblock4 để fine-tune
+        # Cấu trúc features: conv0, norm0, relu0, pool0, denseblock1, transition1, ..., denseblock4, norm5
+        # denseblock4 là layer thứ 12 trong features
+        for name, param in self.backbone_features.named_children():
+            if name == "denseblock4":
+                for p in param.parameters():
+                    p.requires_grad = True
         
         in_features = 1024  # Output features của DenseNet121 trước classifier
         self.csra = CSRA(in_features=in_features, num_classes=num_classes, num_heads=num_heads, lam=lam, dropout=dropout)
