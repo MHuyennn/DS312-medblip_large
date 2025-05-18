@@ -52,7 +52,7 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     print(f"Best threshold: {best_threshold:.2f} with F1-score = {best_f1:.4f}")
     return best_threshold, best_f1
 
-def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_best.pth", patience=5, min_delta=0.001, start_epoch=0):
+def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_best.pth", patience=10, min_delta=0.001, start_epoch=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs")
@@ -103,19 +103,33 @@ def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_b
     mlb = MultiLabelBinarizer(classes=name_list)
     mlb.fit(df_train["Concept_Names"])
 
+    # Data augmentation và transforms
+    train_transforms = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(10),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    valid_transforms = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
     # Datasets
     train_dataset = ImgCaptionConceptDataset(
-        df_train, train_img_dir, name_list, mlb, mode="train"
+        df_train, train_img_dir, name_list, mlb, mode="train", transform=train_transforms
     )
     valid_dataset = ImgCaptionConceptDataset(
-        df_valid, valid_img_dir, name_list, mlb, mode="valid"
+        df_valid, valid_img_dir, name_list, mlb, mode="valid", transform=valid_transforms
     )
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     # Model
-    model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1).to(device)
+    model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
     if num_gpus > 1:
         model = nn.DataParallel(model)
         print("Model wrapped in DataParallel for multi-GPU training")
@@ -123,7 +137,7 @@ def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_b
     # Loss và optimizer
     criterion_concept = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs)
+    scheduler = CosineAnnealingLR(optimizer, T_max=(num_epochs - start_epoch))
 
     # Load checkpoint nếu có
     best_f1 = 0.0
@@ -138,6 +152,7 @@ def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_b
         best_f1 = checkpoint["best_f1"]
         best_threshold = checkpoint["best_threshold"]
         start_epoch = checkpoint["epoch"] + 1
+        scheduler = CosineAnnealingLR(optimizer, T_max=(num_epochs - start_epoch))  # Điều chỉnh scheduler
         print(f"Resuming training from epoch {start_epoch} with best F1-score: {best_f1:.4f}")
 
     # Khởi tạo biến theo dõi
@@ -261,7 +276,7 @@ def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold
 
     # Tải mô hình
     try:
-        model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1).to(device)
+        model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
         checkpoint = torch.load(model_path, map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         if num_gpus > 1:
@@ -318,7 +333,7 @@ def main():
     parser.add_argument("mode", type=str, choices=["train", "predict"])
     parser.add_argument("--root_path", type=str, help="Root path chứa dữ liệu (chỉ cần cho train)")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--num_epochs", type=int, default=20)
+    parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
     parser.add_argument("--model_path", type=str, default="./model_best.pth")
@@ -335,6 +350,7 @@ def main():
             args.num_epochs,
             args.lr,
             args.model_path,
+            patience=10,
             start_epoch=args.start_epoch
         )
         print(f"Using best threshold {best_threshold:.2f} for prediction")
