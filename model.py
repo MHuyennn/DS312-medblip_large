@@ -34,11 +34,11 @@ class CSRA(nn.Module):
 class MedCSRAModel(nn.Module):
     def __init__(self, num_classes, num_heads=1, lam=0.1, dropout=0.5):
         super(MedCSRAModel, self).__init__()
-        # Load EfficientNet-B4 với weights IMAGENET1K_V1
-        from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
-        self.backbone = efficientnet_b4(weights=EfficientNet_B4_Weights.IMAGENET1K_V1)
+        # Load EfficientNet-B5 với weights IMAGENET1K_V1
+        from torchvision.models import efficientnet_b5, EfficientNet_B5_Weights
+        self.backbone = efficientnet_b5(weights=EfficientNet_B5_Weights.IMAGENET1K_V1)
         
-        # Lấy phần features của EfficientNet-B4
+        # Lấy phần features của EfficientNet-B5
         self.backbone_features = self.backbone.features  # Sequential chứa các block của EfficientNet
         self.backbone = nn.Sequential(self.backbone_features)  # Chỉ giữ features, bỏ classifier
         
@@ -46,14 +46,14 @@ class MedCSRAModel(nn.Module):
         for param in self.backbone.parameters():
             param.requires_grad = False
         
-        # Mở block cuối (block7 trong EfficientNet-B4) để fine-tune
+        # Mở block cuối (block7 trong EfficientNet-B5) để fine-tune
         # Cấu trúc features: block1, block2, ..., block7
         for name, param in self.backbone_features.named_children():
             if name == "7":  # block7 là layer cuối
                 for p in param.parameters():
                     p.requires_grad = True
         
-        in_features = 1792  # Output features của EfficientNet-B4 trước classifier
+        in_features = 2048  # Output features của EfficientNet-B5 trước classifier
         self.csra = CSRA(in_features=in_features, num_classes=num_classes, num_heads=num_heads, lam=lam, dropout=dropout)
         self.fc = nn.Linear(in_features, num_classes)
         self.lam = nn.Parameter(torch.tensor(lam))
@@ -61,9 +61,9 @@ class MedCSRAModel(nn.Module):
         self.num_heads = num_heads
 
     def forward(self, x):
-        features = self.backbone(x)  # [batch_size, 1792, 7, 7]
+        features = self.backbone(x)  # [batch_size, 2048, 7, 7]
         # Global average pooling để giảm kích thước không gian
-        features = F.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)  # [batch_size, 1792]
+        features = F.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)  # [batch_size, 2048]
         logits_csra = self.csra(features.unsqueeze(-1).unsqueeze(-1))  # Thêm chiều không gian cho CSRA
         logits_global = self.fc(features)
         logits = (1 - self.lam) * logits_global + self.lam * logits_csra
