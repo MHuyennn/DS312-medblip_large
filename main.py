@@ -39,8 +39,8 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
 
     with torch.no_grad():
         for batch in valid_loader:
-            pixel_values = batch["pixel_values"].to(device)
-            labels_concept = batch["labels_concept"].to(device)
+            pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+            labels_concept = batch["labels_concept"].to(device, non_blocking=True)
 
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
@@ -68,12 +68,14 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
 
 def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_best.pth", patience=10, min_delta=0.001, start_epoch=0):
     # Kiểm tra GPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpus = torch.cuda.device_count()
-    device = torch.device("cuda" if gpus > 0 else "cpu")
-    print(f"Number of GPUs: {gpus}")
+    print(f"Number of GPUs detected: {gpus}")
     if gpus > 0:
-        for i in range(gpus):
-            print(f"GPU {i} name: {torch.cuda.get_device_name(i)}")
+        print(f"GPU name: {torch.cuda.get_device_name(0)} (P100)")
+        # Kiểm tra bộ nhớ GPU trước khi huấn luyện
+        mem = torch.cuda.memory_allocated(0)
+        print(f"Before training - Memory allocated on GPU 0: {mem / 1024**2:.2f} MiB")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
@@ -145,20 +147,16 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         df_valid, valid_img_dir, name_list, mlb, mode="valid", transform=valid_transforms
     )
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True, drop_last=True)
+    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True, drop_last=True)
 
     # Model
     model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
-    if gpus > 1:
-        model = nn.DataParallel(model)  # Sử dụng tất cả GPU
-        print("Model wrapped in DataParallel for multi-GPU training")
 
-    # Kiểm tra phân phối GPU qua bộ nhớ được cấp phát
-    if gpus > 1:
-        for i in range(gpus):
-            mem = torch.cuda.memory_allocated(i)
-            print(f"Memory allocated on GPU {i}: {mem / 1024**2:.2f} MiB")
+    # Kiểm tra bộ nhớ GPU sau khi khởi tạo mô hình
+    if gpus > 0:
+        mem = torch.cuda.memory_allocated(0)
+        print(f"After model initialization - Memory allocated on GPU 0: {mem / 1024**2:.2f} MiB")
 
     # Loss và optimizer
     criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
@@ -170,13 +168,7 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     best_threshold = 0.3
     if os.path.exists(save_path) and start_epoch > 0:
         checkpoint = torch.load(save_path, map_location=device)
-        state_dict = checkpoint["model_state_dict"]
-        if list(state_dict.keys())[0].startswith("module."):
-            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        if gpus > 1:
-            model.module.load_state_dict(state_dict)
-        else:
-            model.load_state_dict(state_dict)
+        model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         best_f1 = checkpoint["best_f1"]
         best_threshold = checkpoint["best_threshold"]
@@ -205,8 +197,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
 
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
-            preds = torch.sigmoid(logits)
-
             loss = criterion_concept(logits, labels_concept)
             loss.backward()
             
@@ -216,10 +206,9 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
             running_loss += loss.item()
 
             # Kiểm tra bộ nhớ GPU sau mỗi batch
-            if gpus > 1:
-                for i in range(gpus):
-                    mem = torch.cuda.memory_allocated(i)
-                    print(f"After batch - Memory allocated on GPU {i}: {mem / 1024**2:.2f} MiB")
+            if gpus > 0:
+                mem = torch.cuda.memory_allocated(0)
+                print(f"After batch - Memory allocated on GPU 0: {mem / 1024**2:.2f} MiB")
 
         scheduler.step()
         avg_loss = running_loss / len(train_loader)
@@ -280,9 +269,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
             best_f1 = valid_f1
             best_threshold = best_threshold
             epochs_no_improve = 0
-            state_dict = model.module.state_dict() if gpus > 1 else model.state_dict()
             torch.save({
-                "model_state_dict": state_dict,
+                "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_f1": best_f1,
                 "best_threshold": best_threshold,
@@ -302,9 +290,9 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     return best_threshold
 
 def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold=0.3):
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")  # Chỉ dùng GPU 0
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     gpus = torch.cuda.device_count()
-    print(f"Detected {gpus} GPUs, but using only 1 GPU (cuda:0) for prediction to avoid DataParallel issues")
+    print(f"Detected {gpus} GPUs (P100), using GPU 0 for prediction")
 
     # Đường dẫn dữ liệu
     if split == "test":
@@ -423,7 +411,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", type=str, choices=["train", "predict"])
     parser.add_argument("--root_path", type=str, help="Root path chứa dữ liệu (chỉ cần cho train)")
-    parser.add_argument("--batch_size", type=int, default=8)  # Mặc định cho 2 GPU
+    parser.add_argument("--batch_size", type=int, default=16)  # Tăng batch_size cho P100 (16GB VRAM)
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
