@@ -444,4 +444,15 @@ def main():
             patience=10,
             start_epoch=args.start_epoch
         )
-        print(f"Using best threshold {best_threshold:.
+        print(f"Using best threshold {best_threshold:.2f} for prediction")
+        args.threshold = best_threshold
+    elif args.mode == "predict":
+        predict(
+            args.split,
+            args.batch_size,
+            args.model_path,
+            args.threshold
+        )
+
+if __name__ == "__main__":
+    main()
