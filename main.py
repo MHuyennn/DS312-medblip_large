@@ -195,11 +195,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
 
             running_loss += loss.item()
 
-            # Kiểm tra bộ nhớ GPU sau mỗi batch
-            if gpus > 0:
-                mem = torch.cuda.memory_allocated(0)
-                print(f"After batch - Memory allocated on GPU 0: {mem / 1024**2:.2f} MiB")
-
         scheduler.step()
         avg_loss = running_loss / len(train_loader)
         print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {avg_loss:.4f}")
