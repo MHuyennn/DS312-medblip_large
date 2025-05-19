@@ -66,7 +66,7 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     print(f"Best threshold: {best_threshold:.2f} with F1-score = {best_f1:.4f}")
     return best_threshold, best_f1
 
-def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_best.pth", patience=10, min_delta=0.001, start_epoch=0):
+def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_best.pth", patience=10, min_delta=0.001, start_epoch=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs for training: {list(range(num_gpus))}")
@@ -199,9 +199,9 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
         for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs} - Training"):
             optimizer.zero_grad()
 
-            # Loại bỏ .to(device) để DataParallel tự quản lý
-            pixel_values = batch["pixel_values"]
-            labels_concept = batch["labels_concept"]
+            # Giữ .to(device) như code DenseNet
+            pixel_values = batch["pixel_values"].to(device)
+            labels_concept = batch["labels_concept"].to(device)
 
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
@@ -301,7 +301,7 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
     print(f"Final best threshold: {best_threshold:.2f} with F1-score: {best_f1:.4f}")
     return best_threshold
 
-def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold=0.3):
+def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold=0.3):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")  # Chỉ dùng GPU 0
     num_gpus = torch.cuda.device_count()
     print(f"Detected {num_gpus} GPUs, but using only 1 GPU (cuda:0) for prediction to avoid DataParallel issues")
@@ -430,7 +430,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", type=str, choices=["train", "predict"])
     parser.add_argument("--root_path", type=str, help="Root path chứa dữ liệu (chỉ cần cho train)")
-    parser.add_argument("--batch_size", type=int, default=16)  # Mặc định cho 2 GPU
+    parser.add_argument("--batch_size", type=int, default=8)  # Mặc định cho 2 GPU
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--split", type=str, choices=["valid", "test"], default="test")
