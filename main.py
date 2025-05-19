@@ -255,7 +255,7 @@ def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold
 
     # Đường dẫn dữ liệu
     if split == "test":
-        img_dir = "/kaggle/input/oggy-ds312/test"
+        img_dir = "/kaggle/input/oggy-ds312/test/test"
     else:
         img_dir = os.path.join("/kaggle/input/if-u-know-u-know", split, split)
     cui_names_csv = "/kaggle/input/if-u-know-u-know/cui_names.csv"
