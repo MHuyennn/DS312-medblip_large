@@ -67,9 +67,9 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     return best_threshold, best_f1
 
 def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_best.pth", patience=10, min_delta=0.001, start_epoch=0):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")  # Chỉ dùng GPU 0
     num_gpus = torch.cuda.device_count()
-    print(f"Using {num_gpus} GPUs")
+    print(f"Detected {num_gpus} GPUs, but using only 1 GPU (cuda:0) for training to avoid DataParallel issues")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
@@ -146,9 +146,7 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
 
     # Model
     model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
-    if num_gpus > 1:
-        model = nn.DataParallel(model)
-        print("Model wrapped in DataParallel for multi-GPU training")
+    print("Using single GPU (cuda:0) for training")
 
     # Loss và optimizer
     criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
@@ -160,10 +158,10 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     best_threshold = 0.3
     if os.path.exists(save_path) and start_epoch > 0:
         checkpoint = torch.load(save_path, map_location=device)
-        if num_gpus > 1:
-            model.module.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            model.load_state_dict(checkpoint["model_state_dict"])
+        state_dict = checkpoint["model_state_dict"]
+        if list(state_dict.keys())[0].startswith("module."):
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         best_f1 = checkpoint["best_f1"]
         best_threshold = checkpoint["best_threshold"]
@@ -259,9 +257,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
             best_f1 = valid_f1
             best_threshold = best_threshold
             epochs_no_improve = 0
-            state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
             torch.save({
-                "model_state_dict": state_dict,
+                "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "best_f1": best_f1,
                 "best_threshold": best_threshold,
@@ -313,7 +310,6 @@ def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold
         checkpoint = torch.load(model_path, map_location=device)
         # Kiểm tra xem checkpoint có được lưu từ DataParallel không
         state_dict = checkpoint["model_state_dict"]
-        # Nếu state_dict có dạng DataParallel (có tiền tố "module."), bỏ tiền tố
         if list(state_dict.keys())[0].startswith("module."):
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         model.load_state_dict(state_dict)
