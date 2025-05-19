@@ -69,7 +69,11 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
 def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_best.pth", patience=10, min_delta=0.001, start_epoch=0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
-    print(f"Using {num_gpus} GPUs for training")
+    print(f"Using {num_gpus} GPUs for training: {list(range(num_gpus))}")
+
+    if num_gpus > 1:
+        device_ids = list(range(num_gpus))  # Sử dụng tất cả GPU (0 và 1)
+        print(f"Assigning device IDs: {device_ids}")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
@@ -147,8 +151,12 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
     # Model
     model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
     if num_gpus > 1:
-        model = nn.DataParallel(model)
-        print("Model wrapped in DataParallel for multi-GPU training")
+        model = nn.DataParallel(model, device_ids=device_ids)
+        print("Model wrapped in DataParallel for multi-GPU training with specified device IDs")
+
+    # Thêm log để kiểm tra phân phối dữ liệu
+    if num_gpus > 1:
+        print(f"Model on devices: {[module.device for module in model.module_list]}")
 
     # Loss và optimizer
     criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
@@ -284,7 +292,7 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
     print(f"Final best threshold: {best_threshold:.2f} with F1-score: {best_f1:.4f}")
     return best_threshold
 
-def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold=0.3):
+def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold=0.3):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")  # Chỉ dùng GPU 0
     num_gpus = torch.cuda.device_count()
     print(f"Detected {num_gpus} GPUs, but using only 1 GPU (cuda:0) for prediction to avoid DataParallel issues")
