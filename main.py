@@ -8,7 +8,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score, precision_score, recall_score
 import numpy as np
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
 
 # Tắt parallelism để tránh cảnh báo
@@ -70,10 +70,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs for training: {list(range(num_gpus))}")
-
-    if num_gpus > 1:
-        device_ids = list(range(num_gpus))  # Sử dụng tất cả GPU (0 và 1)
-        print(f"Assigning device IDs: {device_ids}")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
@@ -151,8 +147,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     # Model
     model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
     if num_gpus > 1:
-        model = nn.DataParallel(model, device_ids=device_ids)
-        print("Model wrapped in DataParallel for multi-GPU training with specified device IDs")
+        model = nn.DataParallel(model)  # Bỏ device_ids, để DataParallel tự chọn GPU
+        print("Model wrapped in DataParallel for multi-GPU training")
 
     # Kiểm tra phân phối GPU qua bộ nhớ được cấp phát
     if num_gpus > 1:
@@ -163,7 +159,7 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     # Loss và optimizer
     criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+    scheduler = CosineAnnealingLR(optimizer, T_max=(num_epochs - start_epoch))
 
     # Load checkpoint nếu có
     best_f1 = 0.0
@@ -181,6 +177,7 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         best_f1 = checkpoint["best_f1"]
         best_threshold = checkpoint["best_threshold"]
         start_epoch = checkpoint["epoch"] + 1
+        scheduler = CosineAnnealingLR(optimizer, T_max=(num_epochs - start_epoch))
         print(f"Resuming training from epoch {start_epoch} with best F1-score: {best_f1:.4f}")
 
     # Khởi tạo biến theo dõi
@@ -199,7 +196,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs} - Training"):
             optimizer.zero_grad()
 
-            # Giữ .to(device) như code DenseNet
             pixel_values = batch["pixel_values"].to(device)
             labels_concept = batch["labels_concept"].to(device)
 
@@ -221,6 +217,7 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
                     mem = torch.cuda.memory_allocated(i)
                     print(f"After batch - Memory allocated on GPU {i}: {mem / 1024**2:.2f} MiB")
 
+        scheduler.step()
         avg_loss = running_loss / len(train_loader)
         print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {avg_loss:.4f}")
 
@@ -296,7 +293,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         if epochs_no_improve >= patience:
             early_stop = True
             print(f"Early stopping: No improvement in F1-score for {patience} epochs.")
-        scheduler.step(valid_f1)
 
     print(f"Final best threshold: {best_threshold:.2f} with F1-score: {best_f1:.4f}")
     return best_threshold
