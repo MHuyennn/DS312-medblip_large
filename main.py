@@ -67,9 +67,13 @@ def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.ara
     return best_threshold, best_f1
 
 def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_best.pth", patience=10, min_delta=0.001, start_epoch=0):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    num_gpus = torch.cuda.device_count()
-    print(f"Using {num_gpus} GPUs for training: {list(range(num_gpus))}")
+    # Kiểm tra GPU
+    gpus = torch.cuda.device_count()
+    device = torch.device("cuda" if gpus > 0 else "cpu")
+    print(f"Number of GPUs: {gpus}")
+    if gpus > 0:
+        for i in range(gpus):
+            print(f"GPU {i} name: {torch.cuda.get_device_name(i)}")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
@@ -141,18 +145,18 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         df_valid, valid_img_dir, name_list, mlb, mode="valid", transform=valid_transforms
     )
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
-    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
     # Model
     model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
-    if num_gpus > 1:
-        model = nn.DataParallel(model)  # Bỏ device_ids, để DataParallel tự chọn GPU
+    if gpus > 1:
+        model = nn.DataParallel(model)  # Sử dụng tất cả GPU
         print("Model wrapped in DataParallel for multi-GPU training")
 
     # Kiểm tra phân phối GPU qua bộ nhớ được cấp phát
-    if num_gpus > 1:
-        for i in range(num_gpus):
+    if gpus > 1:
+        for i in range(gpus):
             mem = torch.cuda.memory_allocated(i)
             print(f"Memory allocated on GPU {i}: {mem / 1024**2:.2f} MiB")
 
@@ -169,7 +173,7 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         state_dict = checkpoint["model_state_dict"]
         if list(state_dict.keys())[0].startswith("module."):
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        if num_gpus > 1:
+        if gpus > 1:
             model.module.load_state_dict(state_dict)
         else:
             model.load_state_dict(state_dict)
@@ -196,8 +200,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs} - Training"):
             optimizer.zero_grad()
 
-            pixel_values = batch["pixel_values"].to(device)
-            labels_concept = batch["labels_concept"].to(device)
+            pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+            labels_concept = batch["labels_concept"].to(device, non_blocking=True)
 
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
@@ -212,8 +216,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
             running_loss += loss.item()
 
             # Kiểm tra bộ nhớ GPU sau mỗi batch
-            if num_gpus > 1:
-                for i in range(num_gpus):
+            if gpus > 1:
+                for i in range(gpus):
                     mem = torch.cuda.memory_allocated(i)
                     print(f"After batch - Memory allocated on GPU {i}: {mem / 1024**2:.2f} MiB")
 
@@ -229,8 +233,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
 
         with torch.no_grad():
             for batch in valid_loader:
-                pixel_values = batch["pixel_values"].to(device)
-                labels_concept = batch["labels_concept"].to(device)
+                pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+                labels_concept = batch["labels_concept"].to(device, non_blocking=True)
 
                 outputs = model(pixel_values)
                 logits = outputs["logits_concept"]
@@ -259,8 +263,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         all_train_probs = []
         with torch.no_grad():
             for batch in train_loader:
-                pixel_values = batch["pixel_values"].to(device)
-                labels_concept = batch["labels_concept"].to(device)
+                pixel_values = batch["pixel_values"].to(device, non_blocking=True)
+                labels_concept = batch["labels_concept"].to(device, non_blocking=True)
                 outputs = model(pixel_values)
                 logits = outputs["logits_concept"]
                 probs = torch.sigmoid(logits).cpu().numpy()
@@ -276,7 +280,7 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
             best_f1 = valid_f1
             best_threshold = best_threshold
             epochs_no_improve = 0
-            state_dict = model.module.state_dict() if num_gpus > 1 else model.state_dict()
+            state_dict = model.module.state_dict() if gpus > 1 else model.state_dict()
             torch.save({
                 "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -299,8 +303,8 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
 
 def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold=0.3):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")  # Chỉ dùng GPU 0
-    num_gpus = torch.cuda.device_count()
-    print(f"Detected {num_gpus} GPUs, but using only 1 GPU (cuda:0) for prediction to avoid DataParallel issues")
+    gpus = torch.cuda.device_count()
+    print(f"Detected {gpus} GPUs, but using only 1 GPU (cuda:0) for prediction to avoid DataParallel issues")
 
     # Đường dẫn dữ liệu
     if split == "test":
@@ -327,7 +331,6 @@ def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold
     try:
         model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
         checkpoint = torch.load(model_path, map_location=device)
-        # Kiểm tra xem checkpoint có được lưu từ DataParallel không
         state_dict = checkpoint["model_state_dict"]
         if list(state_dict.keys())[0].startswith("module."):
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
@@ -355,19 +358,15 @@ def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold
     df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
 
     dataset = ImgCaptionConceptDataset(df_test, img_dir, name_list, mlb, mode="test")
-    # Sử dụng drop_last=True để bỏ batch cuối nếu không đủ mẫu
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=True)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True, drop_last=True)
 
     # Dự đoán
     concept_preds = []
 
     with torch.no_grad():
         for batch in tqdm(loader, desc="Dự đoán"):
-            pixel_values = batch["pixel_values"].to(device)
+            pixel_values = batch["pixel_values"].to(device, non_blocking=True)
             ids = batch["id"]
-
-            # Kiểm tra định dạng đầu vào
-            print(f"Batch pixel values shape: {pixel_values.shape}, device: {pixel_values.device}, dtype: {pixel_values.dtype}")
 
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
@@ -392,14 +391,12 @@ def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold
         remaining_ids = test_ids[-remaining_samples:]
         remaining_df = pd.DataFrame({"ID": remaining_ids, "Concept_Names": [[] for _ in range(len(remaining_ids))]})
         remaining_dataset = ImgCaptionConceptDataset(remaining_df, img_dir, name_list, mlb, mode="test")
-        remaining_loader = torch.utils.data.DataLoader(remaining_dataset, batch_size=1, shuffle=False, num_workers=2)
+        remaining_loader = torch.utils.data.DataLoader(remaining_dataset, batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
 
         with torch.no_grad():
             for batch in tqdm(remaining_loader, desc="Dự đoán các mẫu còn lại"):
-                pixel_values = batch["pixel_values"].to(device)
+                pixel_values = batch["pixel_values"].to(device, non_blocking=True)
                 ids = batch["id"]
-
-                print(f"Remaining batch pixel values shape: {pixel_values.shape}, device: {pixel_values.device}, dtype: {pixel_values.dtype}")
 
                 outputs = model(pixel_values)
                 logits = outputs["logits_concept"]
@@ -447,15 +444,4 @@ def main():
             patience=10,
             start_epoch=args.start_epoch
         )
-        print(f"Using best threshold {best_threshold:.2f} for prediction")
-        args.threshold = best_threshold
-    elif args.mode == "predict":
-        predict(
-            args.split,
-            args.batch_size,
-            args.model_path,
-            args.threshold
-        )
-
-if __name__ == "__main__":
-    main()
+        print(f"Using best threshold {best_threshold:.
