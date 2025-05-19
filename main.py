@@ -154,9 +154,11 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
         model = nn.DataParallel(model, device_ids=device_ids)
         print("Model wrapped in DataParallel for multi-GPU training with specified device IDs")
 
-    # Thêm log để kiểm tra phân phối dữ liệu
+    # Kiểm tra phân phối GPU qua bộ nhớ được cấp phát
     if num_gpus > 1:
-        print(f"Model on devices: {[module.device for module in model.module_list]}")
+        for i in range(num_gpus):
+            mem = torch.cuda.memory_allocated(i)
+            print(f"Memory allocated on GPU {i}: {mem / 1024**2:.2f} MiB")
 
     # Loss và optimizer
     criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
