@@ -163,7 +163,7 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
     # Loss và optimizer
     criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
     # Load checkpoint nếu có
     best_f1 = 0.0
@@ -202,6 +202,9 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
             pixel_values = batch["pixel_values"].to(device)
             labels_concept = batch["labels_concept"].to(device)
 
+            # Thêm log để kiểm tra device của dữ liệu
+            print(f"Batch pixel_values device: {pixel_values.device}, labels_concept device: {labels_concept.device}")
+
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
             preds = torch.sigmoid(logits)
@@ -213,6 +216,12 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
             optimizer.step()
 
             running_loss += loss.item()
+
+            # Kiểm tra bộ nhớ GPU sau mỗi batch
+            if num_gpus > 1:
+                for i in range(num_gpus):
+                    mem = torch.cuda.memory_allocated(i)
+                    print(f"After batch - Memory allocated on GPU {i}: {mem / 1024**2:.2f} MiB")
 
         avg_loss = running_loss / len(train_loader)
         print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {avg_loss:.4f}")
