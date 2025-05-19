@@ -13,6 +13,8 @@ from torchvision import transforms
 
 # Tắt parallelism để tránh cảnh báo
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# Bật debug CUDA
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 from dataset import ImgCaptionConceptDataset
 from model import MedCSRAModel
@@ -280,9 +282,9 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     return best_threshold
 
 def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold=0.3):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")  # Chỉ dùng GPU 0
     num_gpus = torch.cuda.device_count()
-    print(f"Using {num_gpus} GPUs for prediction")
+    print(f"Detected {num_gpus} GPUs, but using only 1 GPU (cuda:0) for prediction to avoid DataParallel issues")
 
     # Đường dẫn dữ liệu
     if split == "test":
@@ -309,14 +311,18 @@ def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold
     try:
         model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
         checkpoint = torch.load(model_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        if num_gpus > 1:
-            model = nn.DataParallel(model)
-            print("Model wrapped in DataParallel for multi-GPU prediction")
-        else:
-            print("Using single GPU for prediction")
+        # Kiểm tra xem checkpoint có được lưu từ DataParallel không
+        state_dict = checkpoint["model_state_dict"]
+        # Nếu state_dict có dạng DataParallel (có tiền tố "module."), bỏ tiền tố
+        if list(state_dict.keys())[0].startswith("module."):
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
+        print("Using single GPU (cuda:0) for prediction")
     except FileNotFoundError:
         print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
+        return
+    except Exception as e:
+        print(f"Lỗi khi tải mô hình: {e}")
         return
     model.eval()
 
@@ -334,7 +340,8 @@ def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold
     df_test["Concept_Names"] = [[] for _ in range(len(df_test))]
 
     dataset = ImgCaptionConceptDataset(df_test, img_dir, name_list, mlb, mode="test")
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+    # Sử dụng drop_last=True để bỏ batch cuối nếu không đủ mẫu
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2, drop_last=True)
 
     # Dự đoán
     concept_preds = []
@@ -362,6 +369,38 @@ def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold
                 cuis = [name2cui[n] for n in concept_names if n in name2cui]
                 print(f"CUIs for ID {ids[i]}: {cuis}")
                 concept_preds.append({"ID": ids[i], "CUIs": ";".join(cuis)})
+
+    # Xử lý các mẫu còn lại (nếu có) do drop_last=True
+    remaining_samples = len(test_ids) % batch_size
+    if remaining_samples > 0:
+        print(f"Processing remaining {remaining_samples} samples individually")
+        remaining_ids = test_ids[-remaining_samples:]
+        remaining_df = pd.DataFrame({"ID": remaining_ids, "Concept_Names": [[] for _ in range(len(remaining_ids))]})
+        remaining_dataset = ImgCaptionConceptDataset(remaining_df, img_dir, name_list, mlb, mode="test")
+        remaining_loader = torch.utils.data.DataLoader(remaining_dataset, batch_size=1, shuffle=False, num_workers=2)
+
+        with torch.no_grad():
+            for batch in tqdm(remaining_loader, desc="Dự đoán các mẫu còn lại"):
+                pixel_values = batch["pixel_values"].to(device)
+                ids = batch["id"]
+
+                print(f"Remaining batch pixel values shape: {pixel_values.shape}, device: {pixel_values.device}, dtype: {pixel_values.dtype}")
+
+                outputs = model(pixel_values)
+                logits = outputs["logits_concept"]
+                probs = torch.sigmoid(logits).cpu().numpy()
+
+                for i in range(len(ids)):
+                    top_k = 5
+                    top_probs, top_indices = torch.topk(torch.tensor(probs[i]), k=top_k)
+                    top_names = [name_list[idx] for idx in top_indices]
+                    print(f"Top {top_k} concepts for ID {ids[i]}: {list(zip(top_names, top_probs.tolist()))}")
+
+                    concept_names = [name_list[j] for j in range(len(name_list)) if probs[i][j] > threshold]
+                    print(f"Concept names for ID {ids[i]}: {concept_names}")
+                    cuis = [name2cui[n] for n in concept_names if n in name2cui]
+                    print(f"CUIs for ID {ids[i]}: {cuis}")
+                    concept_preds.append({"ID": ids[i], "CUIs": ";".join(cuis)})
 
     # Lưu kết quả
     os.makedirs("outputs", exist_ok=True)
