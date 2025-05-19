@@ -71,11 +71,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     gpus = torch.cuda.device_count()
     print(f"Number of GPUs detected: {gpus}")
-    if gpus > 0:
-        print(f"GPU name: {torch.cuda.get_device_name(0)} (P100)")
-        # Kiểm tra bộ nhớ GPU trước khi huấn luyện
-        mem = torch.cuda.memory_allocated(0)
-        print(f"Before training - Memory allocated on GPU 0: {mem / 1024**2:.2f} MiB")
 
     # Load data
     train_img_dir = os.path.join(root_path, "train/train")
@@ -152,11 +147,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
 
     # Model
     model = MedCSRAModel(num_classes=num_classes, num_heads=1, lam=0.1, dropout=0.5).to(device)
-
-    # Kiểm tra bộ nhớ GPU sau khi khởi tạo mô hình
-    if gpus > 0:
-        mem = torch.cuda.memory_allocated(0)
-        print(f"After model initialization - Memory allocated on GPU 0: {mem / 1024**2:.2f} MiB")
 
     # Loss và optimizer
     criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
