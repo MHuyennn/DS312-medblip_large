@@ -8,7 +8,7 @@ from tqdm import tqdm
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics import f1_score, precision_score, recall_score
 import numpy as np
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torchvision import transforms
 
 # Tắt parallelism để tránh cảnh báo
@@ -17,7 +17,19 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from dataset import ImgCaptionConceptDataset
 from model import MedCSRAModel
 
-def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.arange(0.05, 0.6, 0.05)):
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits, targets):
+        bce_loss = nn.BCEWithLogitsLoss(reduction='none')(logits, targets)
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+        return focal_loss.mean()
+
+def evaluate_threshold(model, valid_loader, name_list, device, thresholds=np.arange(0.01, 0.41, 0.01)):
     """Tìm ngưỡng tối ưu cho concept prediction dựa trên F1-score trên tập valid."""
     model.eval()
     all_true_labels = []
@@ -107,7 +119,9 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
     train_transforms = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
+        transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(15),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -135,9 +149,9 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         print("Model wrapped in DataParallel for multi-GPU training")
 
     # Loss và optimizer
-    criterion_concept = nn.BCEWithLogitsLoss()
+    criterion_concept = FocalLoss(alpha=0.25, gamma=2.0)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = CosineAnnealingLR(optimizer, T_max=(num_epochs - start_epoch))
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, verbose=True)
 
     # Load checkpoint nếu có
     best_f1 = 0.0
@@ -152,7 +166,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         best_f1 = checkpoint["best_f1"]
         best_threshold = checkpoint["best_threshold"]
         start_epoch = checkpoint["epoch"] + 1
-        scheduler = CosineAnnealingLR(optimizer, T_max=(num_epochs - start_epoch))  # Điều chỉnh scheduler
         print(f"Resuming training from epoch {start_epoch} with best F1-score: {best_f1:.4f}")
 
     # Khởi tạo biến theo dõi
@@ -186,7 +199,6 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
 
             running_loss += loss.item()
 
-        scheduler.step()
         avg_loss = running_loss / len(train_loader)
         print(f"Epoch [{epoch + 1}/{num_epochs}] Loss: {avg_loss:.4f}")
 
@@ -222,6 +234,24 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         valid_recall = recall_score(all_true_labels, (all_probs > best_threshold).astype(int), average="micro")
         print(f"Validation Loss: {avg_valid_loss:.4f}, Precision: {valid_precision:.4f}, Recall: {valid_recall:.4f}, F1-score (threshold {best_threshold:.2f}): {valid_f1:.4f}")
 
+        # Đánh giá trên tập train
+        model.eval()
+        all_train_labels = []
+        all_train_probs = []
+        with torch.no_grad():
+            for batch in train_loader:
+                pixel_values = batch["pixel_values"].to(device)
+                labels_concept = batch["labels_concept"].to(device)
+                outputs = model(pixel_values)
+                logits = outputs["logits_concept"]
+                probs = torch.sigmoid(logits).cpu().numpy()
+                all_train_labels.append(labels_concept.cpu().numpy())
+                all_train_probs.append(probs)
+        all_train_labels = np.concatenate(all_train_labels, axis=0)
+        all_train_probs = np.concatenate(all_train_probs, axis=0)
+        train_f1 = f1_score(all_train_labels, (all_train_probs > best_threshold).astype(int), average="micro")
+        print(f"Train F1-score (threshold {best_threshold:.2f}): {train_f1:.4f}")
+
         # Save best model nếu F1-score cải thiện
         if valid_f1 > best_f1 + min_delta:
             best_f1 = valid_f1
@@ -244,11 +274,12 @@ def train(root_path, batch_size=8, num_epochs=50, lr=0.001, save_path="./model_b
         if epochs_no_improve >= patience:
             early_stop = True
             print(f"Early stopping: No improvement in F1-score for {patience} epochs.")
+        scheduler.step(valid_f1)
 
     print(f"Final best threshold: {best_threshold:.2f} with F1-score: {best_f1:.4f}")
     return best_threshold
 
-def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold=0.3):
+def predict(split="test", batch_size=4, model_path="./model_best.pth", threshold=0.3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_gpus = torch.cuda.device_count()
     print(f"Using {num_gpus} GPUs for prediction")
@@ -281,10 +312,16 @@ def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold
         model.load_state_dict(checkpoint["model_state_dict"])
         if num_gpus > 1:
             model = nn.DataParallel(model)
+            print("Model wrapped in DataParallel for multi-GPU prediction")
+        else:
+            print("Using single GPU for prediction")
     except FileNotFoundError:
         print(f"Lỗi: Không tìm thấy tệp mô hình tại {model_path}")
         return
     model.eval()
+
+    # Kiểm tra định dạng mô hình
+    print(f"Model architecture: {model}")
 
     # Khởi tạo MultiLabelBinarizer
     mlb = MultiLabelBinarizer(classes=name_list)
@@ -306,6 +343,9 @@ def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold
         for batch in tqdm(loader, desc="Dự đoán"):
             pixel_values = batch["pixel_values"].to(device)
             ids = batch["id"]
+
+            # Kiểm tra định dạng đầu vào
+            print(f"Batch pixel values shape: {pixel_values.shape}, device: {pixel_values.device}, dtype: {pixel_values.dtype}")
 
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
