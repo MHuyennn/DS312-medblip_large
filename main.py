@@ -199,11 +199,9 @@ def train(root_path, batch_size=16, num_epochs=50, lr=0.001, save_path="./model_
         for batch in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs} - Training"):
             optimizer.zero_grad()
 
-            pixel_values = batch["pixel_values"].to(device)
-            labels_concept = batch["labels_concept"].to(device)
-
-            # Thêm log để kiểm tra device của dữ liệu
-            print(f"Batch pixel_values device: {pixel_values.device}, labels_concept device: {labels_concept.device}")
+            # Loại bỏ .to(device) để DataParallel tự quản lý
+            pixel_values = batch["pixel_values"]
+            labels_concept = batch["labels_concept"]
 
             outputs = model(pixel_values)
             logits = outputs["logits_concept"]
