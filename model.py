@@ -4,67 +4,68 @@ import torch.nn.functional as F
 import torchvision.models as models
 
 class CSRA(nn.Module):
-    def __init__(self, in_features, num_classes, num_heads=1, lam=0.1, dropout=0.5):
+    def __init__(self, in_features, num_classes, lam=0.1):
         super(CSRA, self).__init__()
-        self.num_heads = num_heads
-        self.in_features = in_features
-        self.head_dim = in_features // num_heads
-        assert self.head_dim * num_heads == in_features, "in_features must be divisible by num_heads"
-        self.att_fc = nn.ModuleList([nn.Linear(self.head_dim, self.head_dim) for _ in range(num_heads)])
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(in_features, num_classes)
+        self.att_fc = nn.Linear(in_features, in_features)  # Attention map giữ in_features
+        self.fc = nn.Linear(in_features, num_classes)     # Ánh xạ về num_classes
         self.lam = lam
 
     def forward(self, x):
+        # x: [batch_size, in_features, height, width]
         batch_size, in_features, height, width = x.size()
-        x_flat = x.view(batch_size, in_features, -1)
-        x_split = x_flat.view(batch_size, self.num_heads, self.head_dim, height * width)
-        att_maps = []
-        for i in range(self.num_heads):
-            x_head = x_split[:, i, :, :]
-            att_map = torch.sigmoid(self.att_fc[i](x_head.permute(0, 2, 1)))
-            att_map = att_map.permute(0, 2, 1)
-            att_maps.append(att_map)
-        att_map = torch.cat(att_maps, dim=1)
-        att_features = torch.einsum('bcn,bcn->bc', att_map, x_flat)
-        att_features = self.dropout(att_features)
-        logits = self.fc(att_features)
+        
+        # Tính attention map
+        x_flat = x.view(batch_size, in_features, -1)  # [batch_size, in_features, height*width]
+        att_map = torch.sigmoid(self.att_fc(x_flat.permute(0, 2, 1)))  # [batch_size, height*width, in_features]
+        att_map = att_map.permute(0, 2, 1)  # [batch_size, in_features, height*width]
+        
+        # Einsum để tính attention-weighted features
+        att_features = torch.einsum('bcn,bcn->bc', att_map, x_flat)  # [batch_size, in_features]
+        
+        # Ánh xạ về num_classes
+        logits = self.fc(att_features)  # [batch_size, num_classes]
+        
         return logits
 
 class MedCSRAModel(nn.Module):
-    def __init__(self, num_classes, num_heads=1, lam=0.1, dropout=0.5):
+    def __init__(self, num_classes, num_heads=1, lam=0.1):
         super(MedCSRAModel, self).__init__()
-        # Load EfficientNet-B4 với weights IMAGENET1K_V1
-        from torchvision.models import efficientnet_b4, EfficientNet_B4_Weights
-        self.backbone = efficientnet_b4(weights=EfficientNet_B4_Weights.IMAGENET1K_V1)
+        # Load ResNet-101 pre-trained
+        self.backbone = models.resnet101(pretrained=True)
         
-        # Lấy phần features của EfficientNet-B4
-        self.backbone_features = self.backbone.features  # Sequential chứa các block của EfficientNet
-        self.backbone = nn.Sequential(self.backbone_features)  # Chỉ giữ features, bỏ classifier
+        # Lấy đặc trưng từ layer4 (trước global average pooling)
+        self.backbone = nn.Sequential(
+            self.backbone.conv1,
+            self.backbone.bn1,
+            self.backbone.relu,
+            self.backbone.maxpool,
+            self.backbone.layer1,
+            self.backbone.layer2,
+            self.backbone.layer3,
+            self.backbone.layer4
+        )
         
-        # Đóng băng tất cả các layer trong features
-        for param in self.backbone.parameters():
-            param.requires_grad = False
-        
-        # Mở block cuối (block7 trong EfficientNet-B4) để fine-tune
-        # Cấu trúc features: block1, block2, ..., block7
-        for name, param in self.backbone_features.named_children():
-            if name == "7":  # block7 là layer cuối
-                for p in param.parameters():
-                    p.requires_grad = True
-        
-        in_features = 1792  # Output features của EfficientNet-B4 trước classifier
-        self.csra = CSRA(in_features=in_features, num_classes=num_classes, num_heads=num_heads, lam=lam, dropout=dropout)
+        # Lấy số lượng đặc trưng từ layer4
+        in_features = 2048  # ResNet-101 layer4 output features
+        self.csra = CSRA(in_features=in_features, num_classes=num_classes, lam=lam)
         self.fc = nn.Linear(in_features, num_classes)
-        self.lam = nn.Parameter(torch.tensor(lam))
+        
         self.num_classes = num_classes
         self.num_heads = num_heads
+        self.lam = lam
 
     def forward(self, x):
-        features = self.backbone(x)  # [batch_size, 1792, 7, 7]
-        # Global average pooling để giảm kích thước không gian
-        features = F.adaptive_avg_pool2d(features, (1, 1)).squeeze(-1).squeeze(-1)  # [batch_size, 1792]
-        logits_csra = self.csra(features.unsqueeze(-1).unsqueeze(-1))  # Thêm chiều không gian cho CSRA
-        logits_global = self.fc(features)
+        # x: [batch_size, 3, height, width]
+        features = self.backbone(x)  # [batch_size, in_features, height, width]
+        
+        # CSRA branch
+        logits_csra = self.csra(features)  # [batch_size, num_classes]
+        
+        # Global branch
+        features_pooled = features.mean(dim=(2, 3))  # [batch_size, in_features]
+        logits_global = self.fc(features_pooled)  # [batch_size, num_classes]
+        
+        # Kết hợp
         logits = (1 - self.lam) * logits_global + self.lam * logits_csra
+        
         return {"logits_concept": logits}
