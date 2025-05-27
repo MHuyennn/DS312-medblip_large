@@ -6,7 +6,6 @@ from PIL import Image
 from torchvision import transforms
 
 class ImgCaptionConceptDataset(Dataset):
-    """Dataset dùng cho concept detection."""
 
     def __init__(self, dataframe, img_dir, name_list, mlb, image_size=(224, 224), mode="train", transform=None):
         self.df = dataframe
