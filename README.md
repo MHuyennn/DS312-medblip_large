@@ -1,6 +1,6 @@
 ## Introduction
 
-In the ImageCLEFmedical 2024 Caption competition, our team utilized the MedBLIP model and achieved significant results. Below are the methods we used for training, predicting, and evaluating our model.
+In the ImageCLEFmedical 2025 Caption competition, our team built a MedCSRA model and achieved significant results. Below are the methods we used for training, predicting, and evaluating our model.
 
 ## Training
 
