@@ -1,5 +1,6 @@
-# Introduction
+# Med CSRA for ImageClef Medical 2025 at Concept Detection task
 
+## Introduction
 In the ImageCLEFmedical 2025 Concept Detection competition, our team design and implement MedCSRA model and achieved significant results. Below are the methods we used for training, predicting, and evaluating our model.
 
 ## Training
