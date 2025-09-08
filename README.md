@@ -37,8 +37,8 @@ The prediction output will consist of two files: run.csv and valid.csv, which co
 To evaluate the model, use the following command:
 
 ```
-python evaluate.py eval
-    --root={path to the dataset for evaluation}
-    --score={type of score: rouge, bleu, meteor, bertscore}
+python evaluator.py
+    --root_path={path to the dataset for evaluation}
+    --submission_file_path={path to the submission CSV file}
 
 ```
