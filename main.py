@@ -2,7 +2,6 @@
 import pandas as pd
 import transformers
 from transformers import BlipProcessor, BlipForConditionalGeneration, AutoProcessor
-#from transformers import Blip2Processor, Blip2ForConditionalGeneration, AutoProcessor
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import Resize
@@ -158,25 +157,6 @@ def predict(root_path, path_weights="/kaggle/working/"):
     for i in range(len(test_ID)):
          test_ID[i] = test_ID[i].replace(".jpg", "")
 
-    # def get_inferences(IDs, model, paths, max_new_tokens=200):
-    #     """Hàm lấy kết quả dự đoán"""
-    #     data = []
-    #     for ID in tqdm(IDs, desc="Generating captions"):
-    #         path = os.path.join(paths, ID + ".jpg")
-    #         image = cv2.imread(path)
-    #         image = cv2.resize(image, (224, 224))
-    #         inputs = processor(image, return_tensors="pt").to("cuda")
-    #         generated_ids = model.generate(
-    #             **inputs,
-    #             max_new_tokens=max_new_tokens,
-    #             no_repeat_ngram_size=2,
-    #             num_beams=5
-    #         )
-    #         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-    #         data.append([ID, generated_text])
-
-    #     df = pd.DataFrame(data, columns=['ID', 'Caption'])
-    #     return df
     def get_inferences(IDs, model, paths, max_new_tokens=200):
         """Hàm lấy kết quả dự đoán"""
         # Tải file cui_names.csv để ánh xạ từ Name sang CUI
