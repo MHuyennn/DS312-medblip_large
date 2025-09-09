@@ -220,7 +220,7 @@ def train(root_path, batch_size=8, num_epochs=20, lr=0.001, save_path="./model_b
                 "best_threshold": best_threshold,
                 "epoch": epoch
             }, save_path)
-            print(f"✅ Saved best model to {save_path} with F1-score: {best_f1:.4f}")
+            print(f"Saved best model to {save_path} with F1-score: {best_f1:.4f}")
         else:
             epochs_no_improve += 1
             print(f"No improvement in F1-score. Epochs without improvement: {epochs_no_improve}/{patience}")
@@ -311,7 +311,7 @@ def predict(split="test", batch_size=8, model_path="./model_best.pth", threshold
     # Lưu kết quả
     os.makedirs("outputs", exist_ok=True)
     pd.DataFrame(concept_preds).to_csv("outputs/concept_predictions.csv", index=False)
-    print("✅ Đã lưu dự đoán khái niệm vào outputs/concept_predictions.csv")
+    print(" Đã lưu dự đoán khái niệm vào outputs/concept_predictions.csv")
 
 def main():
     parser = argparse.ArgumentParser()
